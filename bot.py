@@ -238,7 +238,7 @@ def generate_excel(house_id, user_id):
 
     today = datetime.now()
     current_month = today.replace(day=1).date()
-    prev_month = (current_month - timedelta(days=1)).replace(day=1).date()
+    prev_month = (current_month - timedelta(days=1)).replace(day=1)
 
     # Заполняем заголовки
     ws.cell(row=4, column=4, value=MONTHS_RU[prev_month.month - 1])
