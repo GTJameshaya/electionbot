@@ -16,6 +16,9 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+# Вымышленные дома из tests/fixtures — до импорта config (его читают admin и bot).
+import os  # noqa: E402
+os.environ["HOUSES_FILE"] = str(ROOT / "tests" / "fixtures" / "houses.json")
 
 from fastapi.testclient import TestClient  # noqa: E402
 from openpyxl import load_workbook  # noqa: E402
@@ -217,12 +220,12 @@ class TestBotAdminEntry(FakeTelegram, Base):
     def test_roles_affect_bot_access_and_last_admin(self):
         ctx = self._ctx()
         self.db.seed_roles([7], [])
-        u = self._update("Химиков 4", user_id=8)
+        u = self._update("Дом 2", user_id=8)
         asyncio.run(bot.handle_message(u, ctx))
         self.assertIn("нет доступа", u.message.reply_text.call_args[0][0])
         self.assertEqual(self.db.get_user(8).messages, 1)  # записан — виден в админке
         self.db.set_role(8, "user", "admin:7")
-        self._open(ctx, "Химиков 4", user_id=8)
+        self._open(ctx, "Дом 2", user_id=8)
         self.assertIsNotNone(self.db.get_session(8))
         self.db.set_role(8, "none", "admin:7")
         u = self._update("1 100", user_id=8)
@@ -241,7 +244,7 @@ class TestBotAdminEntry(FakeTelegram, Base):
     def test_deny_all_without_roles(self):
         self.db.seed_roles([], [])
         for uid in (1, 5, 42):
-            u = self._update("Химиков 4", user_id=uid)
+            u = self._update("Дом 2", user_id=uid)
             ctx = SimpleCtx(self.db)
             asyncio.run(bot.handle_message(u, ctx))
             self.assertIn("нет доступа", u.message.reply_text.call_args[0][0])
@@ -319,39 +322,39 @@ class TestItemsAndRename(AdminBase):
 
     def test_rename_history_excel_and_reseed(self):
         self.login()
-        key = key_of(self.db, 2, "ОЗОН")
+        key = key_of(self.db, 2, "АПТЕКА")
         apt = self.db.apartment_map(2, kind="commerce")[key]
         self.db.save_reading(2, key, "2026-05", 10, USER, kind="commerce")
         self.db.save_reading(2, key, "2026-06", 20, USER, kind="commerce")
-        r = self.post(f"/items/{apt.id}/rename", {"new_name": "ООО Вайлдберриз", "effective_period": "2026-06"})
+        r = self.post(f"/items/{apt.id}/rename", {"new_name": "ООО Здоровье", "effective_period": "2026-06"})
         self.assertEqual(r.status_code, 303)
         hist = self.db.name_history(apt.id)
         self.assertEqual([(h.old_name, h.new_name, h.effective_period, h.changed_by) for h in hist],
-                         [("ОЗОН", "ООО Вайлдберриз", "2026-06", f"admin:{ADMIN}")])
+                         [("АПТЕКА", "ООО Здоровье", "2026-06", f"admin:{ADMIN}")])
         page = self.client.get(f"/items/{apt.id}").text
-        self.assertIn("ООО Вайлдберриз", page)
+        self.assertIn("ООО Здоровье", page)
         self.assertIn("История названий", page)
 
         def name_in_excel(period):
             ws = pick_sheet(load_workbook(io.BytesIO(self.db.build_excel(2, period, "commerce"))))
             return [ws.cell(r, 1).value for r in range(1, ws.max_row + 1)]
-        self.assertIn("ОЗОН", name_in_excel("2026-05"))
-        self.assertNotIn("ООО Вайлдберриз", name_in_excel("2026-05"))
-        self.assertIn("ООО Вайлдберриз", name_in_excel("2026-06"))
-        self.assertNotIn("ОЗОН", name_in_excel("2026-06"))
+        self.assertIn("АПТЕКА", name_in_excel("2026-05"))
+        self.assertNotIn("ООО Здоровье", name_in_excel("2026-05"))
+        self.assertIn("ООО Здоровье", name_in_excel("2026-06"))
+        self.assertNotIn("АПТЕКА", name_in_excel("2026-06"))
         # бот распознаёт и старое, и новое имя
         m = matcher(self.db, 2)
-        self.assertEqual(m.lookup(norm_words("вайлдберриз")), [key])
-        self.assertEqual(m.lookup(norm_words("озон")), [key])
+        self.assertEqual(m.lookup(norm_words("здоровье")), [key])
+        self.assertEqual(m.lookup(norm_words("аптека")), [key])
 
         # повторный посев: шаблон со старым именем и с новым — дублей нет
         count = len(self.db.list_items(2, "commerce"))
         self.db.sync_houses()
         self.assertEqual(len(self.db.list_items(2, "commerce")), count)
         tpl = self.tmp / "template_2_commerce.xlsx"
-        row = next(r for k, r, t in read_rows(tpl, "commerce") if t == "ОЗОН")
+        row = next(r for k, r, t in read_rows(tpl, "commerce") if t == "АПТЕКА")
         wb = load_workbook(io.BytesIO(tpl.read_bytes()))
-        pick_sheet(wb).cell(row, 1).value = "ООО Вайлдберриз"
+        pick_sheet(wb).cell(row, 1).value = "ООО Здоровье"
         wb.save(tpl)
         self.db.sync_houses()
         items = self.db.list_items(2, "commerce")
@@ -365,24 +368,24 @@ class TestAliasesAdmin(AdminBase):
     def test_crud_affects_bot_parser(self):
         from parsing import parse_readings
         self.login()
-        ozon = key_of(self.db, 2, "ОЗОН")
+        pharmacy = key_of(self.db, 2, "АПТЕКА")
         self.assertEqual(commerce("маркет 100", self.db, 2), [])
-        self.post("/aliases/save", {"house": "2", "alias": "маркет", "target": "озон"})
+        self.post("/aliases/save", {"house": "2", "alias": "маркет", "target": "аптека"})
         a = next(x for x in self.db.list_aliases() if x.alias == "маркет")
-        self.assertEqual(commerce("маркет 100", self.db, 2), [(ozon, 100.0, "маркет")])
+        self.assertEqual(commerce("маркет 100", self.db, 2), [(pharmacy, 100.0, "маркет")])
         self.assertEqual(commerce("маркет 100", self.db, 1), [])  # только дом 2
         html = self.client.get("/aliases").text
         self.assertIn("маркет", html)
-        self.assertIn("Химиков 4: ОЗОН", html)
-        r = self.post("/aliases/save", {"house": "2", "alias": "маркет", "target": "лавка"})
+        self.assertIn("Дом 2: АПТЕКА", html)
+        r = self.post("/aliases/save", {"house": "2", "alias": "маркет", "target": "пекарня"})
         self.assertIn("уже", self.client.get("/aliases").text)  # дубль — ошибка
-        self.post("/aliases/save", {"alias_id": a.id, "house": "2", "alias": "маркет", "target": "щедрая"})
-        lavka = key_of(self.db, 2, "Щедрая Лавка")
-        self.assertEqual(commerce("маркет 5", self.db, 2), [(lavka, 5.0, "маркет")])
+        self.post("/aliases/save", {"alias_id": a.id, "house": "2", "alias": "маркет", "target": "добрая"})
+        bakery = key_of(self.db, 2, "Добрая Пекарня")
+        self.assertEqual(commerce("маркет 5", self.db, 2), [(bakery, 5.0, "маркет")])
         self.post(f"/aliases/{a.id}/delete", {})
         self.assertEqual(commerce("маркет 5", self.db, 2), [])
-        # сид из aliases.json уже в БД
-        self.assertIn("лекс", {x.alias for x in self.db.list_aliases()})
+        # стартовые псевдонимы из houses.json уже в БД
+        self.assertIn("лютик", {x.alias for x in self.db.list_aliases()})
 
 
 class TestUsersAdmin(AdminBase):
@@ -409,10 +412,10 @@ class TestSubmissionsMissingCharts(AdminBase):
         self.login()
         p = current_period()
         self.db.save_reading(1, "1", p, 123, USER)
-        self.db.mark_submitted(1, p, USER, "20261001_120000_house1_Химиков_6.xlsx")
+        self.db.mark_submitted(1, p, USER, "20261001_120000_house1_Дом_1.xlsx")
         self.db.mark_failed(1, p, USER, "x.xlsx", "network", kind="commerce")
         html = self.client.get("/submissions").text
-        self.assertIn("20261001_120000_house1_Химиков_6.xlsx", html)
+        self.assertIn("20261001_120000_house1_Дом_1.xlsx", html)
         self.assertIn("ошибка", html)
         self.assertIn("network", html)
         r = self.client.get(f"/download?house=1&kind=residential&period={p}")
@@ -437,7 +440,7 @@ class TestSubmissionsMissingCharts(AdminBase):
         self.assertIn("Кв. 3", h2["missing"])
         c = next(x for x in d["report"] if x["house"] == 2 and x["kind"] == "commerce")
         self.assertEqual(c["done"], 0)
-        self.assertIn("ОЗОН", c["missing"])
+        self.assertIn("АПТЕКА", c["missing"])
         html = self.client.get(f"/missing?period={p}").text
         self.assertIn("Кто не сдал", html)
         self.assertIn(f"не сдали <b class=\"danger\">{total - 2}</b>", html)
@@ -477,34 +480,34 @@ if __name__ == "__main__":
 
 # ======================================================================== исправления после тестового развёртывания
 class TestAliasAfterRename(FakeTelegram, AdminBase):
-    """«ООО «Борис»» → «ИП Борисов»: псевдоним «лекс» (→ «борис») продолжает работать."""
+    """«ООО «Ромашка»» → «ИП Ромашкин»: псевдоним «лютик» (→ «ромашка») продолжает работать."""
 
     def _rename(self):
-        key = key_of(self.db, 1, "ООО «Борис»")
+        key = key_of(self.db, 1, "ООО «Ромашка»")
         apt = self.db.apartment_map(1, kind="commerce")[key]
-        self.db.rename_item(apt.id, "ИП Борисов", "2026-01", "admin:1")
+        self.db.rename_item(apt.id, "ИП Ромашкин", "2026-01", "admin:1")
         return key
 
     def _check_bot(self, key):
         ctx = self._ctx()
-        self._open(ctx, "Волкова д.9 к.1")
-        u = self._update("лекс 71")
+        self._open(ctx, "Дом 1")
+        u = self._update("лютик 71")
         asyncio.run(bot.handle_message(u, ctx))
         reply = u.message.reply_text.call_args[0][0]
         self.assertNotIn("нет такой", reply)
-        self.assertIn("ИП Борисов — 71", reply)
+        self.assertIn("ИП Ромашкин — 71", reply)
         self.assertEqual(self.db.get_readings(1, self.db.get_session(5).period, "commerce")[key], 71)
 
     def test_bound_alias_survives_rename(self):
-        lex = next(a for a in self.db.list_aliases() if a.alias == "лекс")
+        lex = next(a for a in self.db.list_aliases() if a.alias == "лютик")
         key = self._rename()
-        self.assertIn(key, self.db.get_aliases(1)["лекс"][1])   # привязан по id
+        self.assertIn(key, self.db.get_aliases(1)["лютик"][1])   # привязан по id
         self._check_bot(key)
         self.login()
         html = self.client.get("/aliases").text
-        row = html[html.index("<b>лекс</b>"):]
+        row = html[html.index("<b>лютик</b>"):]
         row = row[:row.index("</tr>")]
-        self.assertIn("Волкова д.9 к.1: ИП Борисов", row)
+        self.assertIn("Дом 1: ИП Ромашкин", row)
         self.assertNotIn("никого", row)
         self.assertTrue(self.db.alias_targets()[lex.id])
 
@@ -513,30 +516,30 @@ class TestAliasAfterRename(FakeTelegram, AdminBase):
         with self.db.Session.begin() as s:        # как в старой БД: псевдонимы только текстом
             s.query(AliasTarget).delete()
         key = self._rename()
-        self.assertEqual(self.db.get_aliases(1)["лекс"][1], [])
+        self.assertEqual(self.db.get_aliases(1)["лютик"][1], [])
         self._check_bot(key)                        # фраза ищется и по прошлым названиям
         self.db.end_session(5)
         self.assertGreaterEqual(self.db.bind_aliases(), 1)  # автомиграция при init()
-        self.assertIn(key, self.db.get_aliases(1)["лекс"][1])
+        self.assertIn(key, self.db.get_aliases(1)["лютик"][1])
         # повторная привязка ничего не дублирует
         self.assertEqual(self.db.bind_aliases(), 0)
 
     def test_new_alias_by_old_name_in_admin(self):
         self._rename()
         self.login()
-        self.post("/aliases/save", {"house": "1", "alias": "боря", "target": "ооо борис"})
-        self.assertIn("Волкова д.9 к.1: ИП Борисов", self.client.get("/aliases").text)
+        self.post("/aliases/save", {"house": "1", "alias": "ромка", "target": "ооо ромашка"})
+        self.assertIn("Дом 1: ИП Ромашкин", self.client.get("/aliases").text)
         from parsing import parse_readings
-        self.assertEqual([c[0] for c in parse_readings("боря 5", matcher(self.db, 1)).commerce],
-                         [key_of(self.db, 1, "ИП Борисов")])
+        self.assertEqual([c[0] for c in parse_readings("ромка 5", matcher(self.db, 1)).commerce],
+                         [key_of(self.db, 1, "ИП Ромашкин")])
 
     def test_matcher_old_name_unit(self):
         from ledgers import CommerceMatcher
-        m = CommerceMatcher([("k1", "ИП Борисов"), ("k2", "Пост ЛТД")], {"лекс": "борис"},
-                            extra_names={"k1": ["ООО «Борис»"]})
-        self.assertEqual(m.lookup(norm_words("лекс")), ["k1"])
-        m = CommerceMatcher([("k1", "ИП Борисов")], {"лекс": ("что-то старое", ["k1", "чужой"])})
-        self.assertEqual(m.lookup(norm_words("лекс")), ["k1"])
+        m = CommerceMatcher([("k1", "ИП Ромашкин"), ("k2", "Альфа ЛТД")], {"лютик": "ромашка"},
+                            extra_names={"k1": ["ООО «Ромашка»"]})
+        self.assertEqual(m.lookup(norm_words("лютик")), ["k1"])
+        m = CommerceMatcher([("k1", "ИП Ромашкин")], {"лютик": ("что-то старое", ["k1", "чужой"])})
+        self.assertEqual(m.lookup(norm_words("лютик")), ["k1"])
 
 
 class TestHead(AdminBase):

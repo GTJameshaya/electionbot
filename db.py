@@ -1,4 +1,7 @@
-"""Слой хранения (SQLAlchemy 2.x). По умолчанию SQLite, через DATABASE_URL — PostgreSQL."""
+"""Всё про хранение данных: таблицы и класс Database со всеми запросами.
+
+По умолчанию — SQLite-файл, через DATABASE_URL можно подключить PostgreSQL (SQLAlchemy 2.x).
+"""
 from __future__ import annotations
 
 import json
@@ -13,7 +16,7 @@ from sqlalchemy import (BigInteger, Boolean, DateTime, Float, ForeignKey, Intege
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, sessionmaker
 
-from config import BASE_DIR, HOUSES
+from config import BASE_DIR, DEFAULT_ALIASES, HOUSES
 from apartments import is_nonstandard, natural_key
 from excel_report import read_rows
 from ledgers import COMMERCE, LEDGERS, RESIDENTIAL
@@ -62,10 +65,9 @@ class House(Base):
 class Apartment(Base):
     """Строка ведомости: квартира (kind=residential) или коммерческий абонент (kind=commerce).
 
-    Для коммерции number — короткий ключ из названия (см. ledgers.subscriber_key), title — название.
-    Ключи коммерции («к» + 12 hex) не пересекаются с номерами квартир, поэтому в БД, созданных
-    до появления kind, старое ограничение UNIQUE(house_id, number) остаётся корректным —
-    пересоздавать таблицу (на которую ссылаются readings) не нужно.
+    У коммерции number — короткий ключ из названия (ledgers.subscriber_key), само название — в title.
+    Ключи вида «к» + 12 hex не пересекаются с номерами квартир, поэтому старый UNIQUE(house_id, number)
+    в ранних БД ничему не мешает и таблицу пересоздавать не нужно.
     """
     __tablename__ = "apartments"
     __table_args__ = (UniqueConstraint("house_id", "kind", "number", name="uq_apartment_house_kind_number"),)
@@ -73,10 +75,10 @@ class Apartment(Base):
     house_id: Mapped[int] = mapped_column(ForeignKey("houses.id"), index=True)
     kind: Mapped[str] = mapped_column(String(20), default=RESIDENTIAL, server_default=RESIDENTIAL)
     number: Mapped[str] = mapped_column(String(20))
-    # Базовое название: у коммерции — имя абонента, у квартир — ФИО владельца (колонка B).
-    # Переименования в админке НЕ меняют title, а пишутся в name_history (с периодом действия).
+    # Базовое имя: у коммерции — название, у квартир — ФИО владельца (колонка B).
+    # Переименования из админки title не трогают — они пишутся в name_history.
     title: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    # Как строка называлась в шаблоне при последней синхронизации (для сопоставления после переименований).
+    # Как строка последний раз называлась в шаблоне — чтобы узнать её и после переименований.
     template_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     row_order: Mapped[int] = mapped_column(Integer)  # строка в шаблоне; 0 — добавлено в админке
     active: Mapped[bool] = mapped_column(Boolean, default=True)  # есть в шаблоне (или добавлено вручную)
@@ -100,21 +102,21 @@ class Reading(Base):
 
 
 class UserSession(Base):
-    """Активная сессия пользователя: переживает перезапуск бота."""
+    """Текущая сессия пользователя. Живёт в БД, поэтому переживает перезапуск бота."""
     __tablename__ = "user_sessions"
     user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
     house_id: Mapped[int] = mapped_column(ForeignKey("houses.id"))
     period: Mapped[str] = mapped_column(String(7))
     kind: Mapped[str] = mapped_column(String(20), default=RESIDENTIAL, server_default=RESIDENTIAL)
-    # Квартира/абонент, выбранные кнопкой: следующее сообщение — её показание.
+    # Квартира/абонент, выбранные кнопкой: следующее число — их показание.
     pending_apartment: Mapped[str | None] = mapped_column(String(20), nullable=True)
-    # Очередь неоднозначных коммерческих вводов (JSON): [{"raw":..., "value":..., "candidates":[...]}]
+    # Очередь вопросов «какой подъезд?» (JSON): [{"raw":..., "value":..., "candidates":[...]}]
     pending_choice: Mapped[str | None] = mapped_column(Text, nullable=True)
     started_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 
 
-# Колонки, добавленные после первой версии схемы: (таблица, колонка, DDL-тип).
+# Колонки, которых не было в первой версии схемы: при запуске доливаем их в старые БД.
 _ADDED_COLUMNS = [
     ("user_sessions", "pending_apartment", "VARCHAR(20)"),
     ("user_sessions", "kind", f"VARCHAR(20) NOT NULL DEFAULT '{RESIDENTIAL}'"),
@@ -132,7 +134,7 @@ _ADDED_COLUMNS = [
 
 
 class Submission(Base):
-    """Факт успешной отправки ведомости в группу (или импортированный архивный файл)."""
+    """Журнал отправок ведомости в группу (и удачных, и нет) плюс импортированные архивные файлы."""
     __tablename__ = "submissions"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     house_id: Mapped[int] = mapped_column(ForeignKey("houses.id"), index=True)
@@ -140,8 +142,8 @@ class Submission(Base):
     kind: Mapped[str] = mapped_column(String(20), default=RESIDENTIAL, server_default=RESIDENTIAL)
     submitted_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     submitted_by: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
-    # НЕ уникально: одно и то же имя файла может повториться (повторная отправка). Идемпотентность
-    # импорта архива проверяется в migrate_archive.py явно по (file_name, source='archive').
+    # Не уникально: один и тот же файл могут отправить повторно. Повторный импорт архива
+    # отсекается в migrate_archive.py по паре (file_name, source='archive').
     file_name: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
     source: Mapped[str] = mapped_column(String(20), default="bot")
     status: Mapped[str] = mapped_column(String(20), default="sent", server_default="sent")  # sent / failed
@@ -149,7 +151,7 @@ class Submission(Base):
 
 
 class NameHistory(Base):
-    """Переименования абонента / смена владельца квартиры. new_name действует с effective_period."""
+    """История переименований абонентов и смены владельцев. new_name действует с effective_period."""
     __tablename__ = "name_history"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     apartment_id: Mapped[int] = mapped_column(ForeignKey("apartments.id"), index=True)
@@ -161,7 +163,7 @@ class NameHistory(Base):
 
 
 class Alias(Base):
-    """Псевдоним коммерческого абонента. house_id NULL — для всех домов."""
+    """Псевдоним коммерческого абонента («рома» → «ромашка»). house_id NULL — для всех домов."""
     __tablename__ = "aliases"
     __table_args__ = (UniqueConstraint("house_id", "alias", name="uq_alias_house_alias"),)
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -173,15 +175,15 @@ class Alias(Base):
 
 
 class AliasTarget(Base):
-    """Привязка псевдонима к конкретным абонентам (apartments.id) — не зависит от переименований.
-    Заполняется при сохранении псевдонима и автоматически для старых (только текстовых) псевдонимов."""
+    """Привязка псевдонима к конкретным абонентам по id — не ломается при переименовании.
+    Заполняется при сохранении псевдонима, а для старых псевдонимов — автоматически при запуске."""
     __tablename__ = "alias_targets"
     alias_id: Mapped[int] = mapped_column(ForeignKey("aliases.id", ondelete="CASCADE"), primary_key=True)
     apartment_id: Mapped[int] = mapped_column(ForeignKey("apartments.id", ondelete="CASCADE"), primary_key=True)
 
 
 class BotUser(Base):
-    """Пользователи бота. role: admin (бот + админ-панель) / user (только бот) / none (нет доступа)."""
+    """Все, кто писал боту. role: admin (бот + админка), user (только бот), none (нет доступа)."""
     __tablename__ = "bot_users"
     user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
     username: Mapped[str | None] = mapped_column(String(100), nullable=True)
@@ -202,7 +204,7 @@ class BotUser(Base):
 
 
 class LoginToken(Base):
-    """Одноразовая ссылка входа в админ-панель (хранится только SHA-256 токена)."""
+    """Одноразовая ссылка входа в админку. Сам токен не храним — только его SHA-256."""
     __tablename__ = "login_tokens"
     token_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
     user_id: Mapped[int] = mapped_column(BigInteger, index=True)
@@ -212,14 +214,14 @@ class LoginToken(Base):
 
 
 class Meta(Base):
-    """Служебные настройки (ключ-значение): режим доступа, флаги первичного заполнения."""
+    """Служебные пары ключ-значение (например, отметка «псевдонимы уже перенесены»)."""
     __tablename__ = "meta"
     key: Mapped[str] = mapped_column(String(100), primary_key=True)
     value: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class ReadingAudit(Base):
-    """Журнал изменений показаний: кто, когда, что было и что стало."""
+    """Журнал правок показаний: кто, когда, что было и что стало."""
     __tablename__ = "reading_audit"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     apartment_id: Mapped[int] = mapped_column(ForeignKey("apartments.id"), index=True)
@@ -241,7 +243,7 @@ class LastAdminError(Exception):
 
 
 def name_at(base: str | None, history: list, period: str) -> str | None:
-    """Название, действующее в периоде: базовое + переименования с effective_period <= period."""
+    """Какое имя действовало в этом месяце: базовое, а поверх него — переименования не позже period."""
     name = base
     for h in sorted(history, key=lambda h: (h.effective_period, h.changed_at or datetime.min, h.id or 0)):
         if h.effective_period <= period:
@@ -294,16 +296,15 @@ class Database:
         self._add_missing_columns()
         self._drop_submission_file_name_unique()
         self.sync_houses()
-        from ledgers import load_aliases
-        n = self.seed_aliases(load_aliases(self.base_dir / "aliases.json"))
+        n = self.seed_aliases(DEFAULT_ALIASES)
         if n:
-            logger.info("Псевдонимы перенесены из aliases.json в БД: %d", n)
+            logger.info("Стартовые псевдонимы перенесены из houses.json в БД: %d", n)
         n = self.bind_aliases()
         if n:
             logger.info("Псевдонимы привязаны к абонентам (по id): %d", n)
 
     def _add_missing_columns(self) -> None:
-        """Простейшая миграция схемы для БД, созданных предыдущей версией бота."""
+        """Мини-миграция: добавляет недостающие колонки в БД от старых версий бота."""
         insp = inspect(self.engine)
         with self.engine.begin() as conn:
             for table, column, ddl in _ADDED_COLUMNS:
@@ -314,7 +315,7 @@ class Database:
                     conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}"))
 
     def _file_name_unique_constraints(self) -> tuple[list[str], list[str]]:
-        """(имена UNIQUE-ограничений, имена уникальных индексов) на submissions.file_name."""
+        """Что делает submissions.file_name уникальным: (имена ограничений, имена индексов)."""
         insp = inspect(self.engine)
         constraints = [uc.get("name") or "" for uc in insp.get_unique_constraints("submissions")
                        if uc.get("column_names") == ["file_name"]]
@@ -323,12 +324,10 @@ class Database:
         return constraints, indexes
 
     def _drop_submission_file_name_unique(self) -> None:
-        """Первая версия схемы создавала UNIQUE(file_name) — снимаем его в существующих БД.
+        """Снимает UNIQUE(file_name), который создавала первая версия схемы.
 
-        PostgreSQL и прочие: ALTER TABLE ... DROP CONSTRAINT / DROP INDEX.
-        SQLite не умеет удалять ограничение из CREATE TABLE, поэтому таблица пересоздаётся
-        (стандартная процедура SQLite «12 шагов») внутри одной транзакции BEGIN IMMEDIATE:
-        при любой ошибке — ROLLBACK, данные остаются как были, бот продолжит работу.
+        PostgreSQL и прочие — обычный DROP CONSTRAINT / DROP INDEX. SQLite так не умеет, поэтому
+        там таблица пересоздаётся (см. _rebuild_sqlite_submissions).
         """
         constraints, indexes = self._file_name_unique_constraints()
         if not constraints and not indexes:
@@ -348,6 +347,8 @@ class Database:
         self._rebuild_sqlite_submissions()
 
     def _rebuild_sqlite_submissions(self) -> None:
+        """Пересоздаёт submissions в SQLite без UNIQUE (стандартный рецепт SQLite «12 шагов»).
+        Всё в одной транзакции BEGIN IMMEDIATE: при ошибке — ROLLBACK, данные целы, бот работает дальше."""
         from sqlalchemy.schema import CreateIndex, CreateTable
         dialect = self.engine.dialect
         table = Submission.__table__
@@ -366,7 +367,7 @@ class Database:
                 old_cols = {row[1] for row in cur.execute("PRAGMA table_info(submissions)")}
                 copy_cols = ", ".join(f'"{c.name}"' for c in table.columns if c.name in old_cols)
                 cur.execute("ALTER TABLE submissions RENAME TO submissions_old_unique")
-                # индексы старой таблицы (кроме автоиндексов) мешают создать одноимённые новые
+                # старые индексы (кроме автоматических) заняли бы имена новых — удаляем
                 for (name,) in cur.execute(
                         "SELECT name FROM sqlite_master WHERE type='index' "
                         "AND tbl_name='submissions_old_unique' AND sql IS NOT NULL").fetchall():
@@ -380,7 +381,7 @@ class Database:
                 logger.info("Таблица submissions пересоздана без UNIQUE(file_name) (колонки: %s)", cols)
             except Exception:
                 cur.execute("ROLLBACK")
-                # Не валим запуск: mark_submitted() в этом случае добавит к имени суффикс.
+                # Запуск не роняем: mark_submitted() в этом случае просто добавит к имени суффикс.
                 logger.exception("Не удалось пересоздать submissions — оставляю как есть")
             finally:
                 cur.close()
@@ -389,23 +390,24 @@ class Database:
             raw.close()
 
     def template_path(self, house_id: int, kind: str = RESIDENTIAL) -> Path | None:
+        """Путь к шаблону ведомости; None — у дома такой ведомости нет в настройках."""
         name = HOUSES[house_id].get(LEDGERS[kind].template_key)
         return self.base_dir / name if name else None
 
     def has_ledger(self, house_id: int, kind: str) -> bool:
+        """Есть ли у дома эта ведомость (файл шаблона лежит на месте)."""
         path = self.template_path(house_id, kind)
         return bool(path and path.exists())
 
     def sync_houses(self) -> None:
-        """Создаёт дома, квартиры и коммерческих абонентов по шаблонам. Повторный запуск безопасен.
+        """Заводит дома, квартиры и абонентов коммерции по шаблонам. Запускать повторно безопасно.
 
-        * Квартира сопоставляется по номеру. ФИО из колонки B обновляется, только если владельца
-          не переименовывали в админке (иначе главнее админка).
-        * Абонент коммерции сопоставляется по ключу из названия, а если его нет — по любому известному
-          названию: базовому, «как было в шаблоне» и всем старым/новым именам из истории переименований.
-          Поэтому шаблон и со старым, и с новым названием не создаёт дубль. Название в БД шаблон не меняет.
-        * Строки, исчезнувшие из шаблона, — active=False (добавленные в админке не трогаются).
-        * Отключение в админке (disabled) синхронизация не снимает.
+        * Квартиры ищем по номеру. ФИО из колонки B обновляем, только если владельца не меняли в админке.
+        * Абонентов ищем по ключу, а если не нашли — по любому известному названию (текущему, из шаблона,
+          из истории переименований). Так что и старое, и новое название в шаблоне не создаст дубль.
+          Название в БД шаблон не перезаписывает.
+        * Пропавшие из шаблона строки получают active=False (добавленные в админке не трогаем).
+        * Отключение из админки (disabled) синхронизация не снимает.
         """
         with self.Session.begin() as s:
             for house_id, info in HOUSES.items():
@@ -428,6 +430,7 @@ class Database:
                     logger.info("Дом %s, %s: шаблон синхронизирован", info["name"], ledger.title)
 
     def _sync_ledger(self, s, house_id: int, kind: str, rows: list[tuple[str, int, str]]) -> None:
+        """Сверяет одну ведомость дома со строками шаблона (правила — в sync_houses)."""
         items = list(s.scalars(select(Apartment).where(Apartment.house_id == house_id, Apartment.kind == kind)))
         by_key = {a.number: a for a in items}
         history: dict[int, list[NameHistory]] = {}
@@ -445,7 +448,7 @@ class Database:
             apt = by_key.get(number)
             if apt is None and kind == COMMERCE:
                 apt = by_name.get(_norm_name(title))
-            if apt is not None and apt.id in seen:
+            if apt is not None and apt.id in seen:  # две строки шаблона указали на одну запись
                 continue
             if apt is None:
                 apt = Apartment(house_id=house_id, kind=kind, number=number, title=title or None,
@@ -469,9 +472,11 @@ class Database:
         q = select(Apartment).where(Apartment.house_id == house_id, Apartment.kind == kind)
         if not include_inactive:
             q = q.where(Apartment.active.is_(True), Apartment.disabled.is_(False))
+        # порядок как в шаблоне; добавленные в админке (row_order=0) — в конце
         return q.order_by(case((Apartment.row_order == 0, 1), else_=0), Apartment.row_order, Apartment.id)
 
     def apartment_map(self, house_id: int, s=None, kind: str = RESIDENTIAL) -> dict[str, Apartment]:
+        """{номер/ключ: строка} — только активные и не отключённые, в порядке шаблона."""
         def _q(sess):
             return {a.number: a for a in sess.scalars(self._items_query(house_id, kind))}
         if s is not None:
@@ -480,7 +485,7 @@ class Database:
             return _q(sess)
 
     def list_items(self, house_id: int, kind: str) -> list[Apartment]:
-        """Все строки ведомости (для админки), включая отключённые."""
+        """Все строки ведомости для админки — включая отключённые."""
         with self.Session() as s:
             return list(s.scalars(self._items_query(house_id, kind, include_inactive=True)))
 
@@ -506,7 +511,7 @@ class Database:
 
     def names_for_period(self, house_id: int, kind: str, period: str,
                          include_inactive: bool = False) -> dict[str, str | None]:
-        """{ключ: название/ФИО, действующее в периоде} с учётом истории переименований."""
+        """{ключ: название/ФИО, которое действовало в этом месяце} — с учётом переименований."""
         with self.Session() as s:
             items = list(s.scalars(self._items_query(house_id, kind, include_inactive)))
             hist = self._history(s, [a.id for a in items])
@@ -518,12 +523,12 @@ class Database:
                                   .order_by(NameHistory.effective_period, NameHistory.changed_at)))
 
     def subscribers(self, house_id: int, period: str | None = None) -> list[tuple[str, str]]:
-        """Коммерческие абоненты дома: [(ключ, название на период)] в порядке строк шаблона."""
+        """Абоненты коммерции дома: [(ключ, название на этот месяц)] в порядке шаблона."""
         names = self.names_for_period(house_id, COMMERCE, period or current_period())
         return [(k, n or k) for k, n in names.items()]
 
     def subscriber_names(self, house_id: int) -> dict[str, list[str]]:
-        """Все известные названия абонентов (базовое, из шаблона, старые/новые) — для распознавания в боте."""
+        """Все известные названия каждого абонента (текущее, из шаблона, старые) — чтобы бот узнавал любое."""
         with self.Session() as s:
             items = list(s.scalars(self._items_query(house_id, COMMERCE)))
             hist = self._history(s, [a.id for a in items])
@@ -534,7 +539,7 @@ class Database:
             return out
 
     def rename_item(self, apartment_id: int, new_name: str, effective_period: str, actor: str) -> NameHistory:
-        """Переименование абонента / смена владельца квартиры с периода effective_period. История сохраняется."""
+        """Переименовать абонента / сменить владельца начиная с effective_period. Пишется в историю."""
         new_name = " ".join(new_name.split())
         if not new_name:
             raise ValueError("пустое название")
@@ -551,7 +556,8 @@ class Database:
             return h
 
     def add_item(self, house_id: int, kind: str, number_or_name: str, title: str | None, actor: str) -> Apartment:
-        """Добавить квартиру/абонента вручную (нет в шаблоне — в Excel допишется в конец листа)."""
+        """Добавить квартиру или абонента вручную (в Excel строка допишется в конец листа).
+        Если такая строка уже есть — просто включаем её обратно."""
         from apartments import normalize_apartment
         from ledgers import subscriber_key
         raw = " ".join(number_or_name.split())
@@ -595,8 +601,7 @@ class Database:
     def save_reading(self, house_id: int, number: str, period: str, value: float,
                      user_id: int | None, source: str = "bot", overwrite: bool = True,
                      s=None, kind: str = RESIDENTIAL, actor: str | None = None) -> SaveResult | None:
-        """Сохраняет (или обновляет) показание квартиры/абонента за период.
-        Возвращает None, если строка не найдена (или отключена)."""
+        """Сохраняет или перезаписывает показание за месяц. None — строки нет или она отключена."""
         if s is None:
             with self.Session.begin() as sess:
                 return self.save_reading(house_id, number, period, value, user_id, source, overwrite,
@@ -612,6 +617,7 @@ class Database:
 
     def _write_reading(self, s, apt: Apartment, period: str, value: float, user_id: int | None,
                        source: str, overwrite: bool, actor: str | None) -> SaveResult:
+        """Пишет показание и строчку в журнал reading_audit. overwrite=False — существующее не трогаем."""
         actor = actor or (f"tg:{user_id}" if user_id else source)
         prev = s.scalar(select(Reading.value).where(Reading.apartment_id == apt.id,
                                                     Reading.period == previous_period(period)))
@@ -632,7 +638,7 @@ class Database:
         return SaveResult(number=apt.number, value=value, previous=prev, updated=updated)
 
     def admin_set_reading(self, apartment_id: int, period: str, value: float, actor: str) -> SaveResult:
-        """Создать/исправить показание из админки (source=admin, пишется в журнал)."""
+        """Поставить или исправить показание из админки (source=admin, попадает в журнал)."""
         parse_period(period)
         with self.Session.begin() as s:
             apt = s.get(Apartment, apartment_id)
@@ -641,6 +647,7 @@ class Database:
             return self._write_reading(s, apt, period, value, None, "admin", True, actor)
 
     def admin_delete_reading(self, apartment_id: int, period: str, actor: str) -> bool:
+        """Удалить показание из админки (с записью в журнал). False — удалять было нечего."""
         with self.Session.begin() as s:
             r = s.scalar(select(Reading).where(Reading.apartment_id == apartment_id, Reading.period == period))
             if r is None:
@@ -668,7 +675,7 @@ class Database:
             return list(s.scalars(q.order_by(ReadingAudit.at.desc(), ReadingAudit.id.desc()).limit(limit)))
 
     def value_history(self, house_id: int, kind: str) -> dict[int, dict[str, float]]:
-        """{apartment_id: {период: значение}} — для графиков."""
+        """{apartment_id: {месяц: значение}} — данные для графиков."""
         with self.Session() as s:
             q = (select(Reading.apartment_id, Reading.period, Reading.value)
                  .join(Apartment, Reading.apartment_id == Apartment.id)
@@ -729,8 +736,8 @@ class Database:
     # ---------- отправки
     def mark_submitted(self, house_id: int, period: str, user_id: int | None,
                        file_name: str | None, source: str = "bot", kind: str = RESIDENTIAL) -> None:
-        """Записывает факт отправки. Если в старой БД всё ещё стоит UNIQUE(file_name)
-        (миграция не удалась), к имени добавляется суффикс «#2», «#3»... — запись не теряется."""
+        """Отмечает удачную отправку. Если в старой БД так и остался UNIQUE(file_name),
+        добавляем к имени «#2», «#3»… — запись всё равно сохранится."""
         name = file_name
         for attempt in range(2, 100):
             try:
@@ -746,7 +753,7 @@ class Database:
 
     def mark_failed(self, house_id: int, period: str, user_id: int | None, file_name: str | None,
                     error: str, kind: str = RESIDENTIAL) -> None:
-        """Неудачная попытка отправки — для истории в админке (период НЕ считается отправленным)."""
+        """Неудачная отправка — только для истории в админке; отправленным месяц не считается."""
         try:
             with self.Session.begin() as s:
                 s.add(Submission(house_id=house_id, period=period, submitted_by=user_id, kind=kind,
@@ -761,6 +768,7 @@ class Database:
                                                               Submission.id.desc()).limit(limit)))
 
     def is_submitted(self, house_id: int, period: str, kind: str = RESIDENTIAL) -> bool:
+        """Отправлялась ли уже ведомость за этот месяц (неудачные попытки не считаются)."""
         with self.Session() as s:
             return s.scalar(select(Submission.id).where(Submission.house_id == house_id,
                                                         Submission.status != "failed",
@@ -768,7 +776,8 @@ class Database:
                                                         Submission.period == period).limit(1)) is not None
 
     def has_unsent(self, house_id: int, period: str, kind: str) -> bool:
-        """Есть показания за период, введённые/изменённые после последней отправки (или отправок не было)."""
+        """Есть ли показания, введённые или изменённые после последней удачной отправки
+        (или отправок ещё не было)."""
         with self.Session() as s:
             last_change = s.scalar(
                 select(func.max(Reading.updated_at)).join(Apartment, Reading.apartment_id == Apartment.id)
@@ -793,7 +802,8 @@ class Database:
             m.value = value
 
     def seed_aliases(self, data: dict[str, dict[str, str]]) -> int:
-        """Первичное заполнение псевдонимов из aliases.json (только один раз — дальше главнее админка)."""
+        """Один раз переносит стартовые псевдонимы (из houses.json) в БД. Дальше всё правится в админке.
+        Повторно не срабатывает (отметка aliases_seeded в meta), так что рабочую БД не трогает."""
         with self.Session.begin() as s:
             if self._meta_get(s, "aliases_seeded"):
                 return 0
@@ -804,15 +814,16 @@ class Database:
                     continue
                 for alias, target in mapping.items():
                     s.add(Alias(house_id=house_id, alias=alias.strip().lower(), target=target.strip(),
-                                updated_by="seed:aliases.json"))
+                                updated_by="seed:houses.json"))
                     n += 1
             self._meta_set(s, "aliases_seeded", utcnow().isoformat())
             return n
 
     def get_aliases(self, house_id: int) -> dict[str, tuple[str, list[str]]]:
-        """Псевдонимы для дома: {псевдоним: (фраза, [ключи привязанных абонентов этого дома])}.
-        Общие + собственные (собственные главнее). Привязка по id переживает переименование;
-        фраза дополнительно ищется по текущим и прошлым названиям (CommerceMatcher)."""
+        """Псевдонимы дома: {псевдоним: (фраза, [ключи привязанных абонентов этого дома])}.
+
+        Общие + свои для дома (свои главнее). Привязка по id переживает переименования,
+        а фразу CommerceMatcher дополнительно ищет по текущим и прошлым названиям."""
         with self.Session() as s:
             rows = list(s.scalars(select(Alias).where(or_(Alias.house_id.is_(None), Alias.house_id == house_id))
                                   .order_by(case((Alias.house_id.is_(None), 0), else_=1), Alias.id)))
@@ -827,7 +838,7 @@ class Database:
             return {a.alias: (a.target, links.get(a.id, [])) for a in rows}
 
     def resolve_alias_target(self, house_id: int | None, target: str) -> list[Apartment]:
-        """Абоненты (всех домов, если house_id None), в текущем или прошлом названии которых есть фраза."""
+        """Абоненты, у которых фраза есть в текущем или прошлом названии (house_id None — во всех домах)."""
         from ledgers import CommerceMatcher, norm_words
         out = []
         for h in ([house_id] if house_id else list(HOUSES)):
@@ -838,6 +849,7 @@ class Database:
         return out
 
     def _bind_alias(self, s, alias: Alias) -> int:
+        """Перепривязывает псевдоним к найденным абонентам. Возвращает, к скольким привязали."""
         s.execute(delete(AliasTarget).where(AliasTarget.alias_id == alias.id))
         apts = self.resolve_alias_target(alias.house_id, alias.target)
         for a in apts:
@@ -845,7 +857,7 @@ class Database:
         return len(apts)
 
     def bind_aliases(self) -> int:
-        """Автомиграция: псевдонимы без привязки (старые, только текст) привязываются к абонентам по id."""
+        """Привязывает к абонентам по id старые псевдонимы, у которых была только текстовая фраза."""
         n = 0
         with self.Session.begin() as s:
             bound = set(s.scalars(select(AliasTarget.alias_id).distinct()))
@@ -855,7 +867,7 @@ class Database:
         return n
 
     def alias_targets(self) -> dict[int, list[Apartment]]:
-        """{alias_id: [привязанные абоненты]} — для админки."""
+        """{alias_id: [привязанные абоненты]} — для страницы псевдонимов в админке."""
         with self.Session() as s:
             out: dict[int, list[Apartment]] = {}
             q = select(AliasTarget.alias_id, Apartment).join(Apartment, Apartment.id == AliasTarget.apartment_id)
@@ -868,6 +880,7 @@ class Database:
             return list(s.scalars(select(Alias).order_by(Alias.house_id, Alias.alias)))
 
     def save_alias(self, alias_id: int | None, house_id: int | None, alias: str, target: str, actor: str) -> Alias:
+        """Создать (alias_id=None) или изменить псевдоним и сразу привязать его к абонентам."""
         alias, target = " ".join(alias.lower().split()), " ".join(target.split())
         if not alias or not target:
             raise ValueError("псевдоним и название не должны быть пустыми")
@@ -893,8 +906,8 @@ class Database:
 
     # ---------- пользователи и роли
     def seed_roles(self, admin_ids, user_ids) -> None:
-        """Роли из .env (ADMIN_USER_IDS, ALLOWED_USER_IDS). Применяются к пользователям, чью роль
-        ещё не меняли в админке (updated_by пуст): после ручного изменения главнее админка."""
+        """Роли из .env (ADMIN_USER_IDS, ALLOWED_USER_IDS). Трогаем только тех, кому роль ещё
+        не меняли в админке (updated_by пуст) — после ручной правки главнее админка."""
         wanted = {uid: ROLE_USER for uid in user_ids}
         wanted.update({uid: ROLE_ADMIN for uid in admin_ids})
         with self.Session.begin() as s:
@@ -907,7 +920,7 @@ class Database:
 
     def touch_user(self, user_id: int, username: str | None = None, first_name: str | None = None,
                    last_name: str | None = None) -> str:
-        """Записывает факт обращения к боту и возвращает роль пользователя."""
+        """Отмечает, что человек написал боту, и возвращает его роль."""
         now = utcnow()
         with self.Session.begin() as s:
             u = s.get(BotUser, user_id)
@@ -947,6 +960,7 @@ class Database:
                             .where(BotUser.role.in_((ROLE_ADMIN, ROLE_USER)))) or 0
 
     def set_role(self, user_id: int, role: str, actor: str) -> None:
+        """Сменить роль из админки. Последнего администратора понизить нельзя (LastAdminError)."""
         if role not in ROLES:
             raise ValueError("неизвестная роль")
         with self.Session.begin() as s:
@@ -962,6 +976,8 @@ class Database:
 
     # ---------- одноразовые ссылки входа
     def create_login_token(self, user_id: int, ttl_seconds: int = 300) -> str:
+        """Новый одноразовый токен входа в админку. В БД кладём только его SHA-256,
+        заодно подчищаем давно истёкшие."""
         import hashlib
         import secrets
         from datetime import timedelta
@@ -973,9 +989,10 @@ class Database:
         return raw
 
     def consume_login_token(self, raw: str) -> int | None:
-        """user_id, если токен существует, не истёк и ещё не использован; токен гасится.
-        Атомарно: один UPDATE ... WHERE used_at IS NULL AND expires_at > now — при двух одновременных
-        запросах с одной ссылкой rowcount == 1 получит только один."""
+        """Гасит токен и возвращает user_id; None — токена нет, он истёк или уже использован.
+
+        Всё делается одним UPDATE … WHERE used_at IS NULL, так что из двух одновременных
+        переходов по одной ссылке сработает только один."""
         import hashlib
         from sqlalchemy import update
         if not raw:
@@ -994,8 +1011,8 @@ class Database:
 
     # ---------- Excel
     def build_excel(self, house_id: int, period: str, kind: str = RESIDENTIAL) -> bytes:
-        """Ведомость за период: строки из БД (номер строки шаблона), значения за период и прошлый месяц,
-        название/ФИО, действующее в этом периоде (у коммерции — колонка A, у квартир — B, если меняли)."""
+        """Ведомость за месяц в виде xlsx (байты): показания за этот и прошлый месяц из БД
+        и названия/ФИО, которые действовали в этом месяце."""
         from excel_report import SheetRow, build_workbook
         year, month = parse_period(period)
         prev = self.get_readings(house_id, previous_period(period), kind)
@@ -1010,7 +1027,7 @@ class Database:
             if kind == RESIDENTIAL and not h and a.origin == "template":
                 name = None  # ФИО не меняли — оставляем ячейку шаблона как есть
             if kind == COMMERCE and a.origin == "template" and name == a.template_name:
-                name = None
+                name = None  # название как в шаблоне — ячейку тоже не трогаем
             rows.append(SheetRow(key=a.number, row=a.row_order or None, prev=prev.get(a.number),
                                  cur=cur.get(a.number), name=name, label=a.number))
         return build_workbook(self.template_path(house_id, kind), year, month, ledger=kind, rows=rows)

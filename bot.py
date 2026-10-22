@@ -1,3 +1,7 @@
+"""Telegram-бот: всё общение с людьми — кнопки, сессии, ввод показаний и отправка ведомости в группу.
+
+Запуск: python bot.py (настройки берутся из .env).
+"""
 import asyncio
 import io
 import logging
@@ -10,13 +14,13 @@ from telegram import (InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
 from apartments import apartment_label, format_suggestions, input_example, plural_ru, suggest_apartments
-from config import ALIASES_FILE, HOUSES, ConfigError, Settings, load_settings
+from config import DEFAULT_ALIASES, HOUSES, ConfigError, Settings, load_settings
 from db import ROLE_ADMIN, ROLE_USER, Database, current_period, parse_period, previous_period
 from excel_report import MONTHS_RU
-from ledgers import COMMERCE, LEDGERS, RESIDENTIAL, STOP_WORDS, CommerceMatcher, load_aliases
+from ledgers import COMMERCE, LEDGERS, RESIDENTIAL, STOP_WORDS, CommerceMatcher
 from parsing import fmt_value, parse_readings, parse_value
 
-# Настройка логирования для Bothost
+# Логи в простом текстовом формате (удобно читать на хостинге); болтливый httpx приглушаем.
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
@@ -39,12 +43,12 @@ BTN_COMMERCE = LEDGERS[COMMERCE].title         # «Коммерция»
 BTN_KIND = {BTN_RESIDENTIAL: RESIDENTIAL, BTN_COMMERCE: COMMERCE}
 MARK_DONE = "✅ "
 
-# Постоянная кнопка после завершения
+# Клавиатуры. Базовая — то, что видно вне сессии.
 BASE_KEYBOARD = ReplyKeyboardMarkup([[KeyboardButton(BTN_NEW)]], resize_keyboard=True)
 ADMIN_BASE_KEYBOARD = ReplyKeyboardMarkup([[KeyboardButton(BTN_NEW)], [KeyboardButton(BTN_ADMIN)]],
                                           resize_keyboard=True)
 HOUSE_KEYBOARD = ReplyKeyboardMarkup(
-    [[KeyboardButton(HOUSE_NAMES[1]), KeyboardButton(HOUSE_NAMES[2])]], resize_keyboard=True
+    [[KeyboardButton(name) for name in HOUSE_NAMES.values()]], resize_keyboard=True
 )
 KIND_KEYBOARD = ReplyKeyboardMarkup(
     [[KeyboardButton(BTN_RESIDENTIAL), KeyboardButton(BTN_COMMERCE)], [KeyboardButton(BTN_BACK)]],
@@ -66,16 +70,29 @@ def get_settings(context: ContextTypes.DEFAULT_TYPE) -> Settings:
 
 
 def get_matcher(context: ContextTypes.DEFAULT_TYPE, house_id: int) -> CommerceMatcher:
-    """Псевдонимы читаются из БД на каждое сообщение — правки в админке действуют сразу.
-    Если БД недоступна — запасной вариант из aliases.json."""
+    """Распознаватель абонентов дома. Псевдонимы читаем из БД на каждое сообщение,
+    поэтому правки в админке работают сразу. Если БД недоступна — берём стартовые из houses.json."""
     db = get_db(context)
     try:
         merged = db.get_aliases(house_id)
     except Exception:  # noqa: BLE001
-        logger.exception("Не удалось прочитать псевдонимы из БД — использую aliases.json")
-        aliases = load_aliases(ALIASES_FILE)
-        merged = {**aliases.get("*", {}), **aliases.get(str(house_id), {})}
+        logger.exception("Не удалось прочитать псевдонимы из БД — использую стартовые из houses.json")
+        merged = default_aliases(house_id)
     return CommerceMatcher(db.subscribers(house_id), merged, extra_names=db.subscriber_names(house_id))
+
+
+def default_aliases(house_id: int) -> dict[str, str]:
+    """Стартовые псевдонимы дома из houses.json: общие + свои (свои главнее)."""
+    return {**DEFAULT_ALIASES.get("*", {}), **DEFAULT_ALIASES.get(str(house_id), {})}
+
+
+def entrance_example(context: ContextTypes.DEFAULT_TYPE, house_id: int) -> str:
+    """Слово для примера «… 1 67»: первый псевдоним дома, а если их нет — просто «название»."""
+    try:
+        aliases = get_db(context).get_aliases(house_id)
+    except Exception:  # noqa: BLE001 — подсказка не должна ломать начало сессии
+        aliases = default_aliases(house_id)
+    return next(iter(aliases), "название")
 
 
 def base_keyboard(context: ContextTypes.DEFAULT_TYPE, user_id: int | None) -> ReplyKeyboardMarkup:
@@ -88,7 +105,7 @@ def count_word(n: int, kind: str) -> str:
 
 
 def saved_summary(new: int, updated: int, kind: str = RESIDENTIAL) -> str | None:
-    """«✅ Сохранено 3 квартиры, обновлено 1 квартира» / «… 2 абонента»."""
+    """Итог для пользователя: «✅ Сохранено 3 квартиры, обновлено 1 квартира». None — нечего сказать."""
     parts = []
     if new:
         parts.append(f"сохранено {count_word(new, kind)}")
@@ -146,7 +163,7 @@ def session_keyboard(db: Database, house_id: int, kind: str = RESIDENTIAL, perio
 
 
 def commerce_keyboard(db: Database, house_id: int, period: str) -> ReplyKeyboardMarkup:
-    """По кнопке на абонента (✅ — уже введён за период) + «Файл сейчас», «Готово», «Назад»."""
+    """Кнопка на каждого абонента (✅ — уже введён в этом месяце) + «Файл сейчас», «Готово», «Назад»."""
     entered = db.get_readings(house_id, period, COMMERCE)
     rows = [[KeyboardButton((MARK_DONE if key in entered else "") + title)]
             for key, title in db.subscribers(house_id)]
@@ -183,7 +200,8 @@ def nonstandard_hint(numbers: list[str]) -> str | None:
 
 
 def commerce_hint(context, house_id: int) -> str | None:
-    """Пример ввода коммерции в жилой сессии — по отличительному слову одного из абонентов."""
+    """Подсказка, что коммерцию можно писать прямо в жилой сессии. Пример строим
+    по слову, которое однозначно указывает на одного абонента."""
     matcher = get_matcher(context, house_id)
     if not matcher:
         return None
@@ -198,13 +216,14 @@ def commerce_hint(context, house_id: int) -> str | None:
     text = "🏪 Коммерцию можно писать прямо здесь, вперемешку с квартирами"
     if example:
         text += f": «12 345 {example} 67»"
-    return text + ". Если у абонента несколько подъездов — укажи номер: «лекс 1 67»."
+    word = entrance_example(context, house_id)
+    return text + f". Если у абонента несколько подъездов — укажи номер: «{word} 1 67»."
 
 
 # ======================================================================== доступ / старт
 async def check_access(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """Доступ по роли из БД (admin / user). Каждое обращение записывается в bot_users,
-    поэтому новые пользователи появляются в админке как «ожидают» — одним нажатием им дают роль."""
+    """Пускаем только с ролью admin или user. Каждый визит пишем в bot_users — так новички
+    появляются в админке в «Ожидают доступа», и их можно пустить одной кнопкой."""
     user = update.effective_user
     if user is None:
         return False
@@ -223,12 +242,12 @@ async def check_access(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bo
 def house_keyboard(context: ContextTypes.DEFAULT_TYPE, user_id: int | None) -> ReplyKeyboardMarkup:
     if not get_db(context).is_admin(user_id):
         return HOUSE_KEYBOARD
-    return ReplyKeyboardMarkup([[KeyboardButton(HOUSE_NAMES[1]), KeyboardButton(HOUSE_NAMES[2])],
+    return ReplyKeyboardMarkup([[KeyboardButton(name) for name in HOUSE_NAMES.values()],
                                 [KeyboardButton(BTN_ADMIN)]], resize_keyboard=True)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда /start - выбор дома"""
+    """/start — показываем выбор дома."""
     if not await check_access(update, context):
         return
     await show_houses(update, context)
@@ -240,7 +259,8 @@ async def show_houses(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def choose_house(update: Update, context: ContextTypes.DEFAULT_TYPE, house_id: int):
-    """После выбора дома: «Жилые» / «Коммерция» (если у дома есть коммерческий шаблон)."""
+    """Дом выбран. Если у дома есть коммерция — спрашиваем «Жилые» или «Коммерция»,
+    иначе сразу начинаем жилую сессию."""
     db = get_db(context)
     if db.has_ledger(house_id, COMMERCE) and db.subscribers(house_id):
         context.user_data["kind_house"] = house_id
@@ -294,7 +314,7 @@ async def send_current_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kinds = [sess.kind]
     if sess.kind == RESIDENTIAL and db.has_ledger(sess.house_id, COMMERCE) \
             and db.count_readings(sess.house_id, sess.period, COMMERCE):
-        kinds.append(COMMERCE)  # коммерцию, введённую в жилой сессии, тоже показываем
+        kinds.append(COMMERCE)  # коммерцию, набранную в жилой сессии, тоже присылаем
     for kind in kinds:
         try:
             data = db.build_excel(sess.house_id, sess.period, kind)
@@ -312,7 +332,8 @@ async def send_current_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def _send_ledger(context, settings, db, house_id, period, kind, user_id) -> tuple[bool, str | None]:
-    """Отправляет ведомость в группу. (отправлено?, предупреждение о записи в БД)."""
+    """Шлёт ведомость в группу. Возвращает (отправлено?, текст ошибки записи в БД или None).
+    Если не отправилось — пишем неудачную попытку в журнал и пробрасываем ошибку дальше."""
     file_name = archive_file_name(house_id, kind=kind)
     try:
         data = db.build_excel(house_id, period, kind)
@@ -351,7 +372,7 @@ async def finish_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         _, db_error = await _send_ledger(context, settings, db, house_id, period, kind, user_id)
     except Exception as e:
-        # Период НЕ помечается отправленным, сессия сохраняется — можно нажать «Готово» ещё раз.
+        # Отправку не отмечаем и сессию не закрываем — можно просто нажать «Готово» ещё раз.
         logger.exception("Ошибка отправки")
         await update.message.reply_text(
             f"❌ Ошибка отправки: {e}\nСессия сохранена — нажми «{BTN_DONE}» ещё раз.",
@@ -366,7 +387,7 @@ async def finish_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         messages.append("✅ Файл улетел в группу.")
 
-    # Коммерция, введённая в жилой сессии и ещё не отправленная, — отдельным файлом.
+    # Если в жилой сессии вводили коммерцию и её ещё не отправляли — шлём вторым файлом.
     if kind == RESIDENTIAL and db.has_ledger(house_id, COMMERCE) and db.has_unsent(house_id, period, COMMERCE):
         try:
             _, c_error = await _send_ledger(context, settings, db, house_id, period, COMMERCE, user_id)
@@ -386,8 +407,8 @@ async def finish_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ======================================================================== ввод показаний
 def save_entries(db: Database, sess, entries: list[tuple[str, float]], user_id: int,
                  kind: str = RESIDENTIAL) -> tuple[int, int, list[str]]:
-    """Сохраняет пары (ключ, значение) в ведомость kind.
-    Возвращает (новых, обновлённых, сообщения об ошибках/предупреждениях)."""
+    """Сохраняет пары (ключ, значение) в ведомость kind одной транзакцией.
+    Возвращает (новых, обновлённых, список ошибок и предупреждений)."""
     messages, new, updated = [], 0, 0
     existing = None
     titles = dict(db.subscribers(sess.house_id)) if kind == COMMERCE else {}
@@ -395,7 +416,7 @@ def save_entries(db: Database, sess, entries: list[tuple[str, float]], user_id: 
         for key, value in entries:
             res = db.save_reading(sess.house_id, key, sess.period, value, user_id, s=s, kind=kind)
             name = titles.get(key, key) if kind == COMMERCE else apartment_label(key)
-            if res is None:
+            if res is None:  # такой строки нет (или она отключена)
                 if kind == COMMERCE:
                     messages.append(f"❌ Абонент {name} не найден")
                     continue
@@ -475,6 +496,8 @@ async def enter_readings(update: Update, context: ContextTypes.DEFAULT_TYPE, tex
             out.append(summary)
     out += messages + msgs + c_msgs
 
+    # Неоднозначные названия (абонент без номера подъезда) не сохраняем, а ставим в очередь вопросов.
+
     if parsed.ambiguous:
         db.set_pending_choices(user_id, db.get_pending_choices(user_id) + parsed.ambiguous)
     if out:
@@ -485,7 +508,8 @@ async def enter_readings(update: Update, context: ContextTypes.DEFAULT_TYPE, tex
 
 
 async def handle_choice(update: Update, context: ContextTypes.DEFAULT_TYPE, sess, text: str) -> bool:
-    """Ответ на «какой подъезд?». False — сообщение не об этом (очередь сброшена, обработать как обычно)."""
+    """Ответ на вопрос «какой подъезд?». Вернёт False, если человек написал что-то другое:
+    тогда очередь вопросов сбрасываем, а сообщение разбираем как обычно."""
     db = get_db(context)
     user_id = update.effective_user.id
     choices = db.get_pending_choices(user_id)
@@ -499,7 +523,7 @@ async def handle_choice(update: Update, context: ContextTypes.DEFAULT_TYPE, sess
         return True
     titles = dict(db.subscribers(sess.house_id))
     key = next((k for k in c["candidates"] if titles.get(k) == text), None)
-    if key is None and len(text.split()) <= 2:
+    if key is None and len(text.split()) <= 2:  # «1», «1 подъезд» и т.п.
         matcher = get_matcher(context, sess.house_id)
         key, _ = matcher.entrance_token(c["candidates"], text.split(), 0)
     if key is None:
@@ -548,7 +572,8 @@ async def choose_subscriber(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 
 
 async def enter_pending_value(update: Update, context: ContextTypes.DEFAULT_TYPE, sess, text: str) -> bool:
-    """Показание для квартиры/абонента, выбранных кнопкой. False — сообщение не про неё."""
+    """Число для квартиры или абонента, выбранных кнопкой. False — сообщение не про это
+    (несколько слов), тогда выбор сбрасываем и разбираем текст как обычный ввод."""
     db = get_db(context)
     if len(text.split()) > 1:
         db.set_pending_apartment(update.effective_user.id, None)
@@ -584,7 +609,7 @@ async def enter_pending_value(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 # ======================================================================== админ-панель
 def admin_login_markup(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> InlineKeyboardMarkup:
-    """Кнопки входа: Mini App (если есть https-адрес) и одноразовая ссылка для обычного браузера."""
+    """Кнопки входа в админку: Mini App (если адрес https) и одноразовая ссылка для браузера."""
     settings = get_settings(context)
     base = settings.admin_public_url or "http://127.0.0.1:8080"
     token = get_db(context).create_login_token(user_id, ttl_seconds=300)
@@ -602,7 +627,7 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def admin_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/admin или кнопка «🛠 Админ-панель» — только для администраторов."""
+    """/admin или кнопка «🛠 Админ-панель». Остальным — «Нет доступа»."""
     user_id = update.effective_user.id
     if not get_db(context).is_admin(user_id):
         await update.message.reply_text("Нет доступа")
@@ -614,8 +639,8 @@ async def admin_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ======================================================================== маршрутизация
 async def notify_other_period(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Сессия (например, восстановленная после перезапуска) относится не к текущему месяцу —
-    один раз за запуск бота сообщаем, за какой период продолжаем. Период не меняем."""
+    """Если сессия не за текущий месяц (например, началась в прошлом и пережила перезапуск),
+    один раз за запуск бота напоминаем, за какой месяц продолжаем. Сам месяц не меняем."""
     sess = get_db(context).get_session(update.effective_user.id)
     if sess is None or sess.period == current_period():
         return
@@ -630,7 +655,7 @@ async def notify_other_period(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка всех сообщений"""
+    """Главный обработчик текста: сначала кнопки, потом показания."""
     if not update.message or not update.message.text:
         return
     if not await check_access(update, context):
@@ -664,6 +689,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     db = get_db(context)
     sess = db.get_session(user_id)
+    # Бот ждёт ответ «какой подъезд?» — сначала разбираемся с ним.
     if sess is not None and db.get_pending_choices(user_id) and text not in (BTN_FILE, BTN_DONE):
         if await handle_choice(update, context, sess, text):
             return
@@ -714,7 +740,7 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
 
 
 def main():
-    """Запуск бота"""
+    """Точка входа: читаем настройки, готовим БД и запускаем бота."""
     try:
         settings = load_settings()
     except ConfigError as e:
@@ -749,13 +775,11 @@ def main():
 
 
 async def run_until_signal(app: Application, stop_signals=(signal.SIGINT, signal.SIGTERM)) -> None:
-    """Запуск polling и аккуратная остановка по SIGTERM/SIGINT.
+    """Запускает polling и аккуратно останавливается по SIGTERM/SIGINT.
 
-    Вместо app.run_polling(): в PTB 20.6 при SIGTERM он закрывает цикл событий, пока ещё живы
-    задачи/HTTP-клиент, — в лог падает «Event loop is closed», процесс выходит с кодом 1.
-    Здесь жизненный цикл ручной (рекомендованный PTB вариант): initialize → start → start_polling,
-    ждём сигнал, затем updater.stop → stop → shutdown (ошибки сети при остановке не мешают),
-    и только потом asyncio.run закрывает цикл."""
+    Почему не app.run_polling(): в PTB 20.6 он при SIGTERM закрывает цикл событий раньше времени —
+    в логе «Event loop is closed», код выхода 1. Поэтому всё вручную, как советует PTB:
+    initialize → start → start_polling → ждём сигнал → updater.stop → stop → shutdown."""
     loop = asyncio.get_running_loop()
     stop = asyncio.Event()
     installed = []
@@ -774,9 +798,8 @@ async def run_until_signal(app: Application, stop_signals=(signal.SIGINT, signal
             await stop.wait()
             logger.info("Получен сигнал остановки, завершаю работу…")
         finally:
-            # Каждый шаг — отдельно: если последний запрос к Telegram при остановке упал
-            # (таймаут/нет сети), остальные шаги всё равно выполняются и процесс выходит с кодом 0.
-            # Без app.stop() внутренняя задача PTB игнорирует отмену и процесс зависает.
+            # Шаги по отдельности: если Telegram при выходе не ответил, остальные всё равно
+            # выполнятся и код выхода будет 0. Без app.stop() PTB зависает на выходе.
             for name, running, step in (("updater.stop", lambda: app.updater.running, app.updater.stop),
                                         ("application.stop", lambda: app.running, app.stop),
                                         ("application.shutdown", lambda: True, app.shutdown)):

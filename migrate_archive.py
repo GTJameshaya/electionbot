@@ -1,17 +1,18 @@
-"""Однократный импорт старых архивных ведомостей (archive/*.xlsx) в базу данных.
+"""Разовый перенос старых ведомостей из archive/*.xlsx в базу.
 
-Использование:
+Запуск:
     python migrate_archive.py                  # archive/ рядом с ботом, DATABASE_URL из .env
     python migrate_archive.py --archive /path/to/archive --dry-run
     python migrate_archive.py --no-template    # не брать стартовые показания из шаблонов
 
-Скрипт идемпотентен: повторный запуск ничего не дублирует.
-  * Имя файла: YYYYMMDD_HHMM_house{N}_*.xlsx, показания берутся из колонки E.
-  * Период (месяц) определяется по ячейке D2 файла (дата начала сессии), иначе по дате в имени.
-  * Если за один месяц несколько файлов — побеждает самый поздний.
-  * Показания, введённые через бота (source=bot), НЕ перезаписываются.
-  * Из шаблонов (если не указан --no-template) добавляются показания, которые в них записаны
-    (колонки D/E с месяцами из строки 4), только там, где в БД ещё ничего нет.
+Запускать повторно безопасно — ничего не задвоится.
+  * Имена файлов: YYYYMMDD_HHMM_house{N}_*.xlsx, показания берутся из колонки E.
+    Файлы ..._house{N}_commerce_... идут в ведомость «Коммерция».
+  * Месяц — по дате в D2, а если её нет — по месяцу в шапке или дате в имени файла.
+  * Несколько файлов за один месяц — побеждает самый поздний.
+  * То, что ввели через бота (source=bot), не перезаписывается.
+  * Из шаблонов (без --no-template) берутся записанные в них показания (колонки D/E) —
+    только туда, где в БД ещё пусто.
 """
 from __future__ import annotations
 
@@ -36,18 +37,20 @@ FILE_RE = re.compile(r"^(\d{8})_(\d{4}|\d{6})_house(\d+)_(commerce_)?.*\.xlsx$",
 
 
 def _period_from_file(path: Path, stamp: datetime, sheet: dict) -> str:
+    """Месяц файла: по дате в D2, иначе по месяцу в шапке, иначе по дате из имени."""
     d2 = sheet.get("date")
     if d2 is not None:
         return period_of(d2)
     cur_month = sheet.get("cur_month")
     if cur_month:
-        year = stamp.year - 1 if cur_month > stamp.month else stamp.year
+        year = stamp.year - 1 if cur_month > stamp.month else stamp.year  # «декабрь» в январском файле
         return f"{year:04d}-{cur_month:02d}"
     return period_of(stamp)
 
 
 def _upsert(s, house_id: int, number: str, period: str, value: float, source: str,
             stats: dict, overwrite_sources: tuple[str, ...], kind: str = RESIDENTIAL) -> None:
+    """Добавляет показание. Существующее меняем, только если его источник в overwrite_sources."""
     apt = s.scalar(select(Apartment).where(Apartment.house_id == house_id, Apartment.kind == kind,
                                            Apartment.number == number))
     if apt is None:
@@ -66,6 +69,7 @@ def _upsert(s, house_id: int, number: str, period: str, value: float, source: st
 
 
 def collect_archive(archive_dir: Path) -> list[tuple[Path, int, datetime, str]]:
+    """Подходящие архивные файлы: [(путь, дом, время из имени, ведомость)], от старых к новым."""
     files = []
     for path in sorted(archive_dir.glob("*.xlsx")):
         m = FILE_RE.match(path.name)
@@ -85,6 +89,7 @@ def collect_archive(archive_dir: Path) -> list[tuple[Path, int, datetime, str]]:
 
 
 def migrate(db: Database, archive_dir: Path, use_templates: bool = True) -> dict:
+    """Импорт архива и (по желанию) стартовых значений из шаблонов. Возвращает статистику."""
     stats = {"files": 0, "files_failed": 0, "inserted": 0, "updated": 0, "unchanged": 0,
              "unknown_apartments": 0, "submissions_added": 0, "template_inserted": 0}
 
@@ -104,7 +109,7 @@ def migrate(db: Database, archive_dir: Path, use_templates: bool = True) -> dict
         period = _period_from_file(path, stamp, sheet)
         stats["files"] += 1
         merged = latest.setdefault((house_id, period, kind), {})
-        merged.update(sheet["cur"])  # более поздний файл перекрывает более ранний
+        merged.update(sheet["cur"])  # файлы идут по времени, поэтому поздний перекрывает ранний
         file_info.append((path.name, house_id, period, stamp, kind))
         logger.info("%s -> дом %s (%s), период %s, показаний: %d", path.name, house_id,
                     LEDGERS[kind].title, period, len(sheet["cur"]))
@@ -122,7 +127,7 @@ def migrate(db: Database, archive_dir: Path, use_templates: bool = True) -> dict
                                  submitted_by=None, file_name=name, source="archive"))
                 stats["submissions_added"] += 1
 
-    # 2. Стартовые значения из шаблонов (только если в БД пусто для квартиры+месяца).
+    # 2. Стартовые значения из шаблонов — только там, где в БД пусто.
     if use_templates:
         with db.Session.begin() as s:
             for house_id, kind in ((h, k) for h in HOUSES for k in LEDGERS):
@@ -143,6 +148,7 @@ def migrate(db: Database, archive_dir: Path, use_templates: bool = True) -> dict
                     for number, value in sheet[key].items():
                         _upsert(s, house_id, number, period, value, "template", stats,
                                 overwrite_sources=(), kind=kind)
+                    # вставки из шаблона считаем отдельно, в template_inserted
                     added = stats["inserted"] - before
                     stats["template_inserted"] += added
                     stats["inserted"] = before

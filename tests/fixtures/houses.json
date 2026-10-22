@@ -1,0 +1,23 @@
+{
+  "_comment": "Вымышленные дома для тестов (шаблоны — make_fixtures.py).",
+  "houses": {
+    "1": {
+      "name": "Дом 1",
+      "hashtag": "#Дом1",
+      "template": "template_1.xlsx",
+      "commerce_template": "template_1_commerce.xlsx"
+    },
+    "2": {
+      "name": "Дом 2",
+      "hashtag": "#Дом2",
+      "template": "template_2.xlsx",
+      "commerce_template": "template_2_commerce.xlsx"
+    }
+  },
+  "aliases": {
+    "*": {
+      "лютик": "ромашка",
+      "альфа": "альфа лтд"
+    }
+  }
+}

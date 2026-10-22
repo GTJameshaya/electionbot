@@ -3,7 +3,7 @@
 {% block content %}
 <h1>Псевдонимы коммерческих абонентов</h1>
 <p class="muted">Слово в сообщении бота → абонент, в названии которого есть указанная фраза. Изменения действуют в боте сразу.
-  Отличительные слова названий («озон», «лавка») работают и без псевдонимов.</p>
+  Отличительные слова названий (например, «аптека», «пекарня») работают и без псевдонимов.</p>
 <div class="table-wrap"><table class="data">
   <thead><tr><th>Дом</th><th>Псевдоним</th><th>Фраза из названия</th><th>Находит</th><th></th></tr></thead>
   {% for r in rows %}<tr>
@@ -20,8 +20,8 @@
     <input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="alias_id" value="{{ edit.id if edit else '' }}">
     <label>Дом <select name="house"><option value="*">все дома</option>
       {% for hid, h in HOUSES.items() %}<option value="{{ hid }}" {{ 'selected' if edit and edit.house_id == hid }}>{{ h.name }}</option>{% endfor %}</select></label>
-    <label>Псевдоним <input name="alias" required value="{{ edit.alias if edit else '' }}" placeholder="лекс"></label>
-    <label>Фраза из названия абонента <input name="target" required value="{{ edit.target if edit else '' }}" placeholder="борис"></label>
+    <label>Псевдоним <input name="alias" required value="{{ edit.alias if edit else '' }}" placeholder="рома"></label>
+    <label>Фраза из названия абонента <input name="target" required value="{{ edit.target if edit else '' }}" placeholder="ромашка"></label>
     <button>Сохранить</button>{% if edit %} <a href="/aliases">отмена</a>{% endif %}
   </form>
 </section>

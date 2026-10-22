@@ -1,0 +1,20 @@
+# .gitignore для ПУБЛИЧНОЙ копии (GTJameshaya/electionbot): при экспорте положить как .gitignore.
+# В приватном репозитории houses.json и настоящие шаблоны хранятся в git — для деплоя.
+.env
+data/
+archive/
+sessions/
+__pycache__/
+*.pyc
+*.db
+*.db-wal
+*.db-shm
+.venv/
+venv/
+
+# Настоящие дома и псевдонимы — только локально (образец: houses.example.json)
+/houses.json
+
+# Шаблоны с данными абонентов не публикуются; вымышленные тестовые — можно
+*.xlsx
+!tests/fixtures/*.xlsx

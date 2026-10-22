@@ -1,7 +1,8 @@
-"""Веб-админка бота показаний (FastAPI + Jinja2). Отдельный процесс, общая БД с bot.py.
+"""Веб-админка (FastAPI + Jinja2): показания, абоненты, псевдонимы, пользователи, отправки, графики.
 
-Запуск:  python admin.py            (адрес из ADMIN_HOST / ADMIN_PORT, по умолчанию 127.0.0.1:8080)
-Вход — только через Telegram: кнопка «🛠 Админ-панель» / команда /admin в боте у администраторов.
+Работает отдельным процессом с той же БД, что и бот.
+Запуск: python admin.py (адрес — ADMIN_HOST / ADMIN_PORT, по умолчанию 127.0.0.1:8080).
+Вход — только через Telegram: кнопка «🛠 Админ-панель» или /admin в боте (для администраторов).
 """
 from __future__ import annotations
 
@@ -40,6 +41,7 @@ def period_title(period: str) -> str:
 
 
 def recent_periods(n: int = 18) -> list[str]:
+    """Последние n месяцев, начиная с текущего (для выпадающих списков)."""
     out, p = [], current_period()
     for _ in range(n):
         out.append(p)
@@ -48,6 +50,7 @@ def recent_periods(n: int = 18) -> list[str]:
 
 
 def fmt(v) -> str:
+    """Число для таблиц: 12.0 → «12», 12.5 → «12,5», None → пусто."""
     if v is None:
         return ""
     v = float(v)
@@ -55,6 +58,7 @@ def fmt(v) -> str:
 
 
 def parse_number(raw: str) -> float:
+    """Число из формы («1 234,5» → 1234.5). Отрицательное, NaN или бесконечность — ValueError."""
     raw = (raw or "").strip().replace(" ", "").replace(",", ".")
     v = float(raw)
     if v < 0 or v != v or v in (float("inf"), float("-inf")):
@@ -73,6 +77,7 @@ def ledgers_for(db: Database, house_id: int) -> list[str]:
 
 
 def consumption_series(values: dict[str, float]) -> dict[str, float]:
+    """{месяц: расход} — разница с прошлым месяцем там, где есть оба значения."""
     out = {}
     for p, v in values.items():
         pv = values.get(previous_period(p))
@@ -83,8 +88,8 @@ def consumption_series(values: dict[str, float]) -> dict[str, float]:
 
 # ======================================================================== HEAD
 class HeadAsGetMiddleware:
-    """HEAD на любой GET-маршрут (curl -I, мониторинг): запрос обрабатывается как GET,
-    заголовки (включая Content-Length) отдаются, тело — нет."""
+    """Отвечает на HEAD для любой GET-страницы (curl -I, мониторинг):
+    обрабатываем как GET, заголовки отдаём, тело — нет."""
 
     def __init__(self, app):
         self.app = app
@@ -106,6 +111,7 @@ class HeadAsGetMiddleware:
 
 # ======================================================================== приложение
 def create_app(db: Database, settings: AdminSettings) -> FastAPI:
+    """Собирает приложение со всеми страницами. Маршруты — вложенные функции, им доступны db и settings."""
     app = FastAPI(title="Админ-панель", docs_url=None, redoc_url=None, openapi_url=None)
     app.add_middleware(SessionMiddleware, secret_key=settings.secret_key, session_cookie="eb_admin",
                        max_age=settings.session_hours * 3600, same_site="lax", https_only=settings.https)
@@ -120,8 +126,8 @@ def create_app(db: Database, settings: AdminSettings) -> FastAPI:
     async def security_headers(request: Request, call_next):
         resp = await call_next(request)
         resp.headers.setdefault("X-Content-Type-Options", "nosniff")
-        resp.headers.setdefault("Referrer-Policy", "no-referrer")   # одноразовый токен не утечёт в Referer
-        # Mini App открывается во фрейме web.telegram.org — разрешаем только Telegram
+        resp.headers.setdefault("Referrer-Policy", "no-referrer")   # чтобы токен из ссылки не утёк в Referer
+        # Mini App открывается во фрейме Telegram — встраивать разрешаем только ему
         resp.headers.setdefault("Content-Security-Policy",
                                 "frame-ancestors 'self' https://web.telegram.org https://*.telegram.org")
         resp.headers.setdefault("Cache-Control", "no-store")
@@ -139,11 +145,12 @@ def create_app(db: Database, settings: AdminSettings) -> FastAPI:
         return bool(token) and hmac.compare_digest(expected, token)
 
     def current_admin(request: Request) -> int | None:
+        """user_id вошедшего администратора или None (не вошёл, сессия истекла, роль сняли)."""
         uid = request.session.get("uid")
         login_at = request.session.get("login_at", 0)
         if not uid or time.time() - login_at > settings.session_hours * 3600:
             return None
-        return uid if db.is_admin(uid) else None   # роль проверяется на каждом запросе
+        return uid if db.is_admin(uid) else None   # роль проверяем на каждом запросе
 
     def login_session(request: Request, uid: int) -> None:
         request.session.clear()
@@ -167,7 +174,7 @@ def create_app(db: Database, settings: AdminSettings) -> FastAPI:
         return RedirectResponse(url, status_code=303)
 
     def guard(request: Request):
-        """None — ок; иначе ответ (редирект на /login или 401 для API)."""
+        """None — всё ок; иначе готовый ответ: редирект на /login (или 401 для /api/)."""
         if current_admin(request) is not None:
             return None
         if request.url.path.startswith("/api/"):
@@ -175,6 +182,7 @@ def create_app(db: Database, settings: AdminSettings) -> FastAPI:
         return redirect("/login")
 
     async def form_guard(request: Request, csrf: str):
+        """Как guard, плюс проверка CSRF-токена — для всех POST-форм."""
         g = guard(request)
         if g is not None:
             return g
@@ -204,7 +212,7 @@ def create_app(db: Database, settings: AdminSettings) -> FastAPI:
 
     @app.post("/auth/webapp")
     async def webapp_login(request: Request):
-        # CSRF не нужен: доказательство — подпись initData ботом Telegram (HMAC, свежесть ≤ 1 суток).
+        # CSRF тут не нужен: вход подтверждает подпись Telegram (HMAC, не старше суток).
         try:
             payload = await request.json()
             user = validate_webapp_init_data(str(payload.get("init_data", "")), settings.bot_token)
@@ -245,12 +253,14 @@ def create_app(db: Database, settings: AdminSettings) -> FastAPI:
 
     # ------------------------------------------------------------ показания
     def sel(request: Request) -> tuple[int, str, str]:
+        """Дом, ведомость и месяц из адреса страницы; кривые значения заменяем на умолчания."""
         q = request.query_params
+        first = next(iter(HOUSES))
         try:
-            house = int(q.get("house", 1))
+            house = int(q.get("house", first))
         except ValueError:
-            house = 1
-        house = house if house in HOUSES else 1
+            house = first
+        house = house if house in HOUSES else first
         kind = q.get("kind", RESIDENTIAL)
         kind = kind if kind in LEDGERS else RESIDENTIAL
         period = q.get("period") or current_period()
@@ -261,6 +271,7 @@ def create_app(db: Database, settings: AdminSettings) -> FastAPI:
         return house, kind, period
 
     def readings_table(house: int, kind: str, period: str) -> list[dict]:
+        """Строки для страницы «Показания»: прошлое, текущее, расход (отрицательный — подсветим)."""
         items = [i for i in db.list_items(house, kind) if i.active or i.origin == "admin"]
         names = db.names_for_period(house, kind, period, include_inactive=True)
         prev_p = previous_period(period)
@@ -299,6 +310,7 @@ def create_app(db: Database, settings: AdminSettings) -> FastAPI:
             flash(request, msg, "warn" if res.decreased else "ok")
         except ValueError:
             flash(request, f"«{value}» — не число", "error")
+        # возвращаемся только на свои страницы (защита от open redirect)
         return redirect(ret if ret.startswith("/") and not ret.startswith("//") else "/readings")
 
     @app.post("/readings/delete")
@@ -358,6 +370,7 @@ def create_app(db: Database, settings: AdminSettings) -> FastAPI:
                       period=current_period(), periods=recent_periods(24)[::-1] + _future(3))
 
     def _future(n):
+        """Следующие n месяцев — чтобы переименование можно было запланировать наперёд."""
         out, p = [], current_period()
         for _ in range(n):
             y, m = parse_period(p)
@@ -379,8 +392,8 @@ def create_app(db: Database, settings: AdminSettings) -> FastAPI:
 
     # ------------------------------------------------------------ псевдонимы
     def alias_matches(alias, bound: dict) -> list[str]:
-        """Кого находит псевдоним — так же, как бот: привязанные по id + поиск фразы
-        по текущим и прошлым названиям. Подпись — текущее название абонента."""
+        """Кого найдёт псевдоним — так же, как бот: привязанные по id + поиск фразы
+        по всем названиям. Показываем текущие названия абонентов."""
         apts = {a.id: a for a in bound.get(alias.id, [])}
         apts.update({a.id: a for a in db.resolve_alias_target(alias.house_id, alias.target)})
         names = {h: db.names_for_period(h, COMMERCE, current_period(), include_inactive=True)
@@ -478,6 +491,7 @@ def create_app(db: Database, settings: AdminSettings) -> FastAPI:
 
     # ------------------------------------------------------------ кто не сдал
     def missing_report(period: str) -> list[dict]:
+        """Сводка «Кто не сдал» за месяц по всем домам и ведомостям."""
         out = []
         for house in HOUSES:
             for kind in ledgers_for(db, house):
@@ -544,12 +558,13 @@ def create_app(db: Database, settings: AdminSettings) -> FastAPI:
         return {"item": item_id, "periods": periods, "labels": [period_title(p) for p in periods],
                 "values": [values[p] for p in periods], "consumption": [cons.get(p) for p in periods]}
 
-    app.add_middleware(HeadAsGetMiddleware)  # добавлен последним — внешний слой
+    app.add_middleware(HeadAsGetMiddleware)  # последним — значит, самым внешним слоем
     return app
 
 
 # ======================================================================== запуск
 def main(argv=None) -> int:
+    """Точка входа: настройки, БД, роли из .env — и запускаем uvicorn."""
     logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
     try:
         settings = load_admin_settings()

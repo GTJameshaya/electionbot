@@ -15,7 +15,10 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 ROOT = Path(__file__).resolve().parent.parent
+FIXTURES = ROOT / "tests" / "fixtures"
 sys.path.insert(0, str(ROOT))
+# Тесты работают на вымышленных домах и шаблонах из tests/fixtures (без настоящих адресов).
+os.environ["HOUSES_FILE"] = str(FIXTURES / "houses.json")
 
 from openpyxl import load_workbook  # noqa: E402
 
@@ -28,7 +31,7 @@ from parsing import parse_readings  # noqa: E402
 
 def make_db(tmp: Path) -> Database:
     for name in ("template_1.xlsx", "template_2.xlsx", "template_1_commerce.xlsx", "template_2_commerce.xlsx"):
-        shutil.copy(ROOT / name, tmp / name)
+        shutil.copy(FIXTURES / name, tmp / name)
     db = Database(f"sqlite:///{tmp / 'test.db'}", base_dir=tmp)
     db.init()
     return db
@@ -93,17 +96,79 @@ class TestConfig(unittest.TestCase):
             os.environ.update(env)
 
 
+class TestHousesFile(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _write(self, data):
+        import json
+        p = self.tmp / "houses.json"
+        p.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        return p
+
+    def test_fixture_loaded(self):
+        self.assertEqual(config.HOUSES[1], {"name": "Дом 1", "hashtag": "#Дом1", "template": "template_1.xlsx",
+                                            "commerce_template": "template_1_commerce.xlsx"})
+        self.assertEqual(list(config.HOUSES), [1, 2])
+        self.assertEqual(config.HOUSES_FILE, FIXTURES / "houses.json")
+
+    def test_missing_file_message(self):
+        with self.assertRaises(config.ConfigError) as cm:
+            config.load_houses(self.tmp / "nope.json")
+        self.assertIn("houses.example.json", str(cm.exception))
+
+    def test_example_file_is_valid(self):
+        houses, aliases = config.load_houses(ROOT / "houses.example.json")
+        self.assertEqual([h["name"] for h in houses.values()], ["Дом 1", "Дом 2"])
+        self.assertIn("*", aliases)
+
+    def test_validation(self):
+        good = {"name": "А", "hashtag": "#А", "template": "a.xlsx"}
+        for bad in ({}, {"houses": {}}, {"houses": {"x": good}}, {"houses": {"1": {"name": "А"}}},
+                    {"houses": {"1": good, "2": good}},                       # одинаковые названия
+                    {"houses": {"1": good}, "aliases": {"7": {"а": "б"}}},  # псевдоним для несуществующего дома
+                    {"houses": {"1": good}, "aliases": ["а"]}):
+            with self.assertRaises(config.ConfigError, msg=bad):
+                config.load_houses(self._write(bad))
+        houses, aliases = config.load_houses(self._write({"_c": 1, "houses": {"2": good, "1": dict(good, name="Б")}}))
+        self.assertEqual(list(houses), [1, 2])          # по номеру дома
+        self.assertNotIn("commerce_template", houses[2])
+        self.assertEqual(aliases, {})
+
+    def test_env_override(self):
+        env = dict(os.environ)
+        try:
+            os.environ["HOUSES_FILE"] = "/tmp/elsewhere.json"
+            self.assertEqual(config.houses_file_path(), Path("/tmp/elsewhere.json"))
+            os.environ["HOUSES_FILE"] = "conf/h.json"
+            self.assertEqual(config.houses_file_path(), ROOT / "conf" / "h.json")
+        finally:
+            os.environ.clear()
+            os.environ.update(env)
+
+
 class TestDatabase(Base):
     def test_seed(self):
         a1 = self.db.apartment_map(1)
         a2 = self.db.apartment_map(2)
-        self.assertEqual(len(a1), len(read_apartment_rows(ROOT / "template_1.xlsx")))
+        self.assertEqual(len(a1), len(read_apartment_rows(FIXTURES / "template_1.xlsx")))
         self.assertIn("2ц", a1)
         self.assertNotIn("*сословабонента", a1)
         self.assertEqual(len(a2), 118)
         self.assertEqual(a1["1"].row_order, 5)
         self.db.sync_houses()  # повторно — без дублей
         self.assertEqual(len(self.db.apartment_map(1)), len(a1))
+
+    def test_aliases_seeded_once(self):
+        names = {a.alias for a in self.db.list_aliases()}
+        self.assertEqual(names, set(config.DEFAULT_ALIASES["*"]))
+        self.db.delete_alias(next(a.id for a in self.db.list_aliases() if a.alias == "лютик"))
+        self.db.init()  # перезапуск: удалённый в админке псевдоним не возвращается, дублей нет
+        self.assertEqual({a.alias for a in self.db.list_aliases()}, names - {"лютик"})
+        self.assertEqual(self.db.seed_aliases({"*": {"новый": "ромашка"}}), 0)  # рабочую БД не трогаем
 
     def test_readings_previous_month_and_update(self):
         self.db.save_reading(1, "1", "2026-09", 1000, 11)
@@ -148,7 +213,7 @@ class TestExcel(Base):
         self.assertEqual((ws["D7"].value, ws["E7"].value), (None, None))  # старые значения шаблона стёрты
         self.assertEqual(ws["D75"].value, 50)
         self.assertEqual(ws["A78"].value, "*Со слов абонента")  # строки после квартир не тронуты
-        self.assertEqual(ws["B5"].value, "Антонян Н. Г.")
+        self.assertEqual(ws["B5"].value, "Иванов И. И.")
 
     def test_redo_same_month_uses_previous_month(self):
         """Баг старой версии: повторная сессия в том же месяце брала текущие значения как предыдущие."""
@@ -165,7 +230,7 @@ class TestExcel(Base):
 
 
 def make_archive_file(path: Path, house: int, d2: datetime, values: dict, prev_values=None):
-    wb = load_workbook(io.BytesIO((ROOT / f"template_{house}.xlsx").read_bytes()))
+    wb = load_workbook(io.BytesIO((FIXTURES / f"template_{house}.xlsx").read_bytes()))
     ws = wb.active
     ws["D2"] = d2
     for row in range(5, ws.max_row + 1):
@@ -182,12 +247,12 @@ class TestMigration(Base):
     def test_import_idempotent(self):
         arch = self.tmp / "archive"
         arch.mkdir()
-        make_archive_file(arch / "20260921_1200_house1_Волкова_д.9_к.1.xlsx", 1,
+        make_archive_file(arch / "20260921_1200_house1_Дом_1.xlsx", 1,
                           datetime(2026, 9, 21), {"1": 12900, "2": 30100})
         # Повтор в том же месяце: более поздний файл должен победить
-        make_archive_file(arch / "20260922_0900_house1_Волкова_д.9_к.1.xlsx", 1,
+        make_archive_file(arch / "20260922_0900_house1_Дом_1.xlsx", 1,
                           datetime(2026, 9, 21), {"1": 13000, "3": 22300})
-        make_archive_file(arch / "20261021_1000_house2_Химиков_4.xlsx", 2,
+        make_archive_file(arch / "20261021_1000_house2_Дом_2.xlsx", 2,
                           datetime(2026, 10, 21), {"1": 14300.5})
         (arch / "random.xlsx").write_bytes(b"not an xlsx")
         self.db.save_reading(2, "1", "2026-10", 14400, 77)  # введено ботом — не трогать
@@ -251,7 +316,7 @@ class TestBotHandlers(FakeTelegram, Base):
         import bot
         ctx = self._ctx(send_side_effect=[RuntimeError("network"), None])
         run = asyncio.run
-        self._open(ctx, "Химиков 4")
+        self._open(ctx, "Дом 2")
         sess = self.db.get_session(5)
         self.assertEqual(sess.house_id, 2)
 
@@ -277,13 +342,13 @@ class TestBotHandlers(FakeTelegram, Base):
         self.assertTrue(self.db.is_submitted(2, sess.period))
         self.assertIsNone(self.db.get_session(5))
         kwargs = ctx.bot.send_document.call_args.kwargs
-        self.assertIn("#Химиков", kwargs["caption"])
-        self.assertRegex(kwargs["filename"], r"^\d{8}_\d{6}_house2_Химиков_4\.xlsx$")
+        self.assertIn("#Дом2", kwargs["caption"])
+        self.assertRegex(kwargs["filename"], r"^\d{8}_\d{6}_house2_Дом_2\.xlsx$")
 
     def test_access_denied(self):
         import bot
         ctx = self._ctx()
-        u = self._update("Химиков 4", user_id=6)  # роли нет
+        u = self._update("Дом 2", user_id=6)  # роли нет
         asyncio.run(bot.handle_message(u, ctx))
         self.assertIn("нет доступа", u.message.reply_text.call_args[0][0])
         self.assertIn("6", u.message.reply_text.call_args[0][0])
@@ -384,7 +449,7 @@ class TestNonstandardBot(FakeTelegram, Base):
         import bot
         run = asyncio.run
         ctx = self._ctx()
-        u = self._open(ctx, "Волкова д.9 к.1")
+        u = self._open(ctx, "Дом 1")
         text = self._last(u)[0][0]
         self.assertIn("Цоколь 2, Цоколь 3, Цоколь 4", text)
         self.assertIn("«2ц 345» или «цоколь 2 345»", text)
@@ -424,14 +489,14 @@ class TestNonstandardBot(FakeTelegram, Base):
         import bot
         run = asyncio.run
         ctx = self._ctx()
-        u = self._open(ctx, "Химиков 4")
+        u = self._open(ctx, "Дом 2")
         self.assertNotIn("Нестандартные", self._last(u)[0][0])
         self.assertIs(self._last(u).kwargs["reply_markup"], bot.SESSION_KEYBOARD)
         u = self._update(bot.BTN_NONSTD)
         run(bot.handle_message(u, ctx))
         self.assertIn("нет нестандартных", self._last(u)[0][0])
 
-        self._open(ctx, "Волкова д.9 к.1")
+        self._open(ctx, "Дом 1")
         run(bot.handle_message(self._update("Цоколь 4"), ctx))
         run(bot.handle_message(self._update(bot.BTN_BACK), ctx))
         self.assertIsNone(self.db.get_session(5).pending_apartment)
@@ -475,7 +540,7 @@ def create_old_unique_schema(path: Path, rows: int = 2):
     eng = create_engine(f"sqlite:///{path}")
     md.create_all(eng)
     with eng.begin() as c:
-        c.execute(insert(md.tables["houses"]).values(id=1, name="Волкова д.9 к.1", hashtag="#В", template="t"))
+        c.execute(insert(md.tables["houses"]).values(id=1, name="Дом 1", hashtag="#В", template="t"))
         for i in range(rows):
             c.execute(insert(subs).values(house_id=1, period="2026-09", submitted_at=datetime(2026, 9, 21),
                                           submitted_by=None, file_name=f"old{i}.xlsx", source="archive"))
@@ -533,7 +598,7 @@ class TestDoneAndPeriod(FakeTelegram, Base):
         import bot
         ctx = self._ctx()
         for _ in range(2):
-            self._open(ctx, "Химиков 4")
+            self._open(ctx, "Дом 2")
             asyncio.run(bot.handle_message(self._update("1 100"), ctx))
             u = self._update("Готово")
             asyncio.run(bot.handle_message(u, ctx))
@@ -544,7 +609,7 @@ class TestDoneAndPeriod(FakeTelegram, Base):
     def test_mark_submitted_failure_warns_user(self):
         import bot
         ctx = self._ctx()
-        self._open(ctx, "Химиков 4")
+        self._open(ctx, "Дом 2")
 
         def boom(*a, **k):
             raise RuntimeError("db is locked")
@@ -563,7 +628,7 @@ class TestDoneAndPeriod(FakeTelegram, Base):
         u = self._update("1 100")
         asyncio.run(bot.handle_message(u, ctx))
         texts = [c[0][0] for c in u.message.reply_text.call_args_list]
-        self.assertEqual(texts[0], "ℹ️ Продолжаем сессию за Сентябрь 2026 — Химиков 4")
+        self.assertEqual(texts[0], "ℹ️ Продолжаем сессию за Сентябрь 2026 — Дом 2")
         self.assertIn("Сохранено 1 квартира", texts[1])
         self.assertEqual(self.db.get_readings(2, "2026-09"), {"1": 100})  # период не изменился
         u = self._update("2 200")
@@ -573,16 +638,16 @@ class TestDoneAndPeriod(FakeTelegram, Base):
     def test_no_notice_for_current_period(self):
         import bot
         ctx = self._ctx()
-        self._open(ctx, "Химиков 4")
+        self._open(ctx, "Дом 2")
         u = self._update("1 100")
         asyncio.run(bot.handle_message(u, ctx))
         self.assertEqual(len(u.message.reply_text.call_args_list), 1)
 
 
 # ============================================================== Коммерция
-VOLKOVA_COMMERCE = ["Магазин «ОВОЩНОЙ»", "ООО «Борис»", "Пост ЛТД"]
-HIMIKOV_COMMERCE = ["Пост ЛТД 1 подъезд", "Пост ЛТД 2 подъезд", "ООО БОРИС 1 подъезд",
-                    "ООО БОРИС 2 подъезд", "ОЗОН", "Щедрая Лавка"]
+HOUSE1_COMMERCE = ["Магазин «ПРОДУКТЫ»", "ООО «Ромашка»", "Альфа ЛТД"]
+HOUSE2_COMMERCE = ["Альфа ЛТД 1 подъезд", "Альфа ЛТД 2 подъезд", "ООО РОМАШКА 1 подъезд",
+                    "ООО РОМАШКА 2 подъезд", "АПТЕКА", "Добрая Пекарня"]
 
 
 def key_of(db, house, title):
@@ -592,20 +657,20 @@ def key_of(db, house, title):
 class TestCommerceTemplates(Base):
     def test_parse_both_templates(self):
         from excel_report import read_rows, read_sheet_values
-        r1 = read_rows(ROOT / "template_1_commerce.xlsx", "commerce")
-        r2 = read_rows(ROOT / "template_2_commerce.xlsx", "commerce")
-        self.assertEqual([t for _, _, t in r1], VOLKOVA_COMMERCE)
-        self.assertEqual([t for _, _, t in r2], HIMIKOV_COMMERCE)
+        r1 = read_rows(FIXTURES / "template_1_commerce.xlsx", "commerce")
+        r2 = read_rows(FIXTURES / "template_2_commerce.xlsx", "commerce")
+        self.assertEqual([t for _, _, t in r1], HOUSE1_COMMERCE)
+        self.assertEqual([t for _, _, t in r2], HOUSE2_COMMERCE)
         self.assertEqual([r for _, r, _ in r1], [6, 7, 8])
-        v1 = read_sheet_values(ROOT / "template_1_commerce.xlsx", "commerce")
-        v2 = read_sheet_values(ROOT / "template_2_commerce.xlsx", "commerce")
+        v1 = read_sheet_values(FIXTURES / "template_1_commerce.xlsx", "commerce")
+        v2 = read_sheet_values(FIXTURES / "template_2_commerce.xlsx", "commerce")
         self.assertEqual((v1["prev_month"], v1["cur_month"]), (9, 10))
         self.assertEqual((v2["prev_month"], v2["cur_month"]), (8, 9))
         self.assertEqual(sorted(v2["cur"].values())[-1], 66469)
 
     def test_pick_sheet_with_data_not_active(self):
         from excel_report import read_rows
-        wb = load_workbook(io.BytesIO((ROOT / "template_1_commerce.xlsx").read_bytes()))
+        wb = load_workbook(io.BytesIO((FIXTURES / "template_1_commerce.xlsx").read_bytes()))
         wb.active = 1  # пустой «Лист1» активен
         path = self.tmp / "active_empty.xlsx"
         wb.save(path)
@@ -613,23 +678,23 @@ class TestCommerceTemplates(Base):
         self.assertEqual(len(read_rows(path, "commerce")), 3)
 
     def test_seed_subscribers_separately(self):
-        self.assertEqual([t for _, t in self.db.subscribers(1)], VOLKOVA_COMMERCE)
-        self.assertEqual([t for _, t in self.db.subscribers(2)], HIMIKOV_COMMERCE)
+        self.assertEqual([t for _, t in self.db.subscribers(1)], HOUSE1_COMMERCE)
+        self.assertEqual([t for _, t in self.db.subscribers(2)], HOUSE2_COMMERCE)
         self.assertEqual(len(self.db.apartment_numbers(1)), 73)   # жилые не изменились
         self.assertEqual(len(self.db.apartment_numbers(2)), 118)
         self.db.sync_houses()
         self.assertEqual(len(self.db.subscribers(2)), 6)
 
     def test_excel_keeps_formulas(self):
-        ozon = key_of(self.db, 2, "ОЗОН")
-        self.db.save_reading(2, ozon, "2026-09", 60497, 1, kind="commerce")
-        self.db.save_reading(2, ozon, "2026-10", 60600.5, 1, kind="commerce")
+        pharmacy = key_of(self.db, 2, "АПТЕКА")
+        self.db.save_reading(2, pharmacy, "2026-09", 60497, 1, kind="commerce")
+        self.db.save_reading(2, pharmacy, "2026-10", 60600.5, 1, kind="commerce")
         ws = wb_from_bytes(self.db.build_excel(2, "2026-10", "commerce")).active
         self.assertEqual((ws["D5"].value, ws["E5"].value, ws["F5"].value), ("Сентябрь", "Октябрь", "Расход"
                                                                             if ws["F5"].value == "Расход"
                                                                             else "расход"))
         self.assertEqual(ws["D2"].value, datetime(2026, 10, 21))
-        self.assertEqual((ws["A10"].value, ws["D10"].value, ws["E10"].value), ("ОЗОН", 60497, 60600.5))
+        self.assertEqual((ws["A10"].value, ws["D10"].value, ws["E10"].value), ("АПТЕКА", 60497, 60600.5))
         self.assertEqual(ws["F10"].value, "=E10-D10")
         self.assertEqual(ws["F6"].value, "=E6-D6")
         self.assertEqual((ws["D6"].value, ws["E6"].value), (None, None))  # старые значения шаблона стёрты
@@ -642,10 +707,10 @@ class TestCommerceTemplates(Base):
         arch = self.tmp / "archive"
         arch.mkdir()
         migrate(self.db, arch, use_templates=True)
-        self.assertEqual(self.db.get_readings(1, "2025-09", "commerce")[key_of(self.db, 1, "Пост ЛТД")], 2069)
-        self.assertEqual(self.db.get_readings(1, "2025-10", "commerce")[key_of(self.db, 1, "ООО «Борис»")], 673)
-        self.assertEqual(self.db.get_readings(2, "2025-08", "commerce")[key_of(self.db, 2, "ОЗОН")], 60330)
-        self.assertEqual(self.db.get_readings(2, "2025-09", "commerce")[key_of(self.db, 2, "Щедрая Лавка")], 66469)
+        self.assertEqual(self.db.get_readings(1, "2025-09", "commerce")[key_of(self.db, 1, "Альфа ЛТД")], 2069)
+        self.assertEqual(self.db.get_readings(1, "2025-10", "commerce")[key_of(self.db, 1, "ООО «Ромашка»")], 673)
+        self.assertEqual(self.db.get_readings(2, "2025-08", "commerce")[key_of(self.db, 2, "АПТЕКА")], 60330)
+        self.assertEqual(self.db.get_readings(2, "2025-09", "commerce")[key_of(self.db, 2, "Добрая Пекарня")], 66469)
         st = migrate(self.db, arch, use_templates=True)
         self.assertEqual(st["template_inserted"], 0)
 
@@ -653,8 +718,8 @@ class TestCommerceTemplates(Base):
         from migrate_archive import collect_archive
         arch = self.tmp / "archive"
         arch.mkdir()
-        shutil.copy(ROOT / "template_2_commerce.xlsx", arch / "20261021_101530_house2_commerce_Химиков_4.xlsx")
-        make_archive_file(arch / "20261021_101531_house2_Химиков_4.xlsx", 2, datetime(2026, 10, 21), {"1": 5})
+        shutil.copy(FIXTURES / "template_2_commerce.xlsx", arch / "20261021_101530_house2_commerce_Дом_2.xlsx")
+        make_archive_file(arch / "20261021_101531_house2_Дом_2.xlsx", 2, datetime(2026, 10, 21), {"1": 5})
         files = collect_archive(arch)
         self.assertEqual([(f[1], f[3]) for f in files], [(2, "commerce"), (2, "residential")])
         self.assertEqual(files[0][2], datetime(2026, 10, 21, 10, 15, 30))
@@ -678,7 +743,7 @@ class TestCommerceTemplates(Base):
             CREATE TABLE submissions (id INTEGER PRIMARY KEY, house_id INTEGER, period VARCHAR(7),
                                       submitted_at DATETIME, submitted_by BIGINT, file_name VARCHAR(255),
                                       source VARCHAR(20));
-            INSERT INTO houses VALUES (1, 'Волкова д.9 к.1', '#Волкова', 'template_1.xlsx');
+            INSERT INTO houses VALUES (1, 'Дом 1', '#Дом1', 'template_1.xlsx');
             INSERT INTO apartments VALUES (1, 1, '1', 5, 1);
             INSERT INTO readings VALUES (1, 1, '2026-09', 13000, 1, 'bot', NULL, NULL);
             INSERT INTO user_sessions VALUES (9, 1, '2026-10', NULL, NULL, NULL);
@@ -689,8 +754,8 @@ class TestCommerceTemplates(Base):
         db.init()
         self.assertEqual(db.get_readings(1, "2026-09"), {"1": 13000})
         self.assertEqual(db.get_session(9).kind, "residential")
-        self.assertEqual([t for _, t in db.subscribers(1)], VOLKOVA_COMMERCE)
-        k = key_of(db, 1, "Пост ЛТД")
+        self.assertEqual([t for _, t in db.subscribers(1)], HOUSE1_COMMERCE)
+        k = key_of(db, 1, "Альфа ЛТД")
         self.assertIsNotNone(db.save_reading(1, k, "2026-10", 5, 1, kind="commerce"))
         db.mark_submitted(1, "2026-10", 1, "x.xlsx", kind="commerce")
         self.assertTrue(db.is_submitted(1, "2026-10", "commerce"))
@@ -700,8 +765,8 @@ class TestCommerceTemplates(Base):
 
 class TestAliases(unittest.TestCase):
     def _m(self, titles, aliases=None):
-        from ledgers import CommerceMatcher, load_aliases, subscriber_key
-        aliases = load_aliases(ROOT / "aliases.json")["*"] if aliases is None else aliases
+        from ledgers import CommerceMatcher, subscriber_key
+        aliases = config.DEFAULT_ALIASES["*"] if aliases is None else aliases
         return CommerceMatcher([(subscriber_key(t), t) for t in titles], aliases)
 
     def _titles(self, m, text):
@@ -709,50 +774,53 @@ class TestAliases(unittest.TestCase):
         return [m.titles[k] for k in r.candidates] if r else None
 
     def test_aliases_and_typos(self):
-        m1, m2 = self._m(VOLKOVA_COMMERCE), self._m(HIMIKOV_COMMERCE)
-        for q in ["лекс", "Лекс", "леккс", "лекс.", "ЛЕКС", "борис", "ооо борис"]:
-            self.assertEqual(self._titles(m1, q), ["ООО «Борис»"], q)
-            self.assertEqual(self._titles(m2, q), ["ООО БОРИС 1 подъезд", "ООО БОРИС 2 подъезд"], q)
-        self.assertEqual(self._titles(m1, "пост"), ["Пост ЛТД"])
-        self.assertEqual(self._titles(m2, "постт"), ["Пост ЛТД 1 подъезд", "Пост ЛТД 2 подъезд"])
-        self.assertEqual(self._titles(m1, "овощной"), ["Магазин «ОВОЩНОЙ»"])
-        self.assertEqual(self._titles(m2, "озон"), ["ОЗОН"])
-        self.assertEqual(self._titles(m2, "лавка"), ["Щедрая Лавка"])
-        self.assertEqual(self._titles(m2, "щедрая"), ["Щедрая Лавка"])
-        self.assertEqual(self._titles(m2, "щедрая лавка"), ["Щедрая Лавка"])
+        m1, m2 = self._m(HOUSE1_COMMERCE), self._m(HOUSE2_COMMERCE)
+        for q in ["лютик", "Лютик", "лютикк", "лютик.", "ЛЮТИК", "ромашка", "ооо ромашка"]:
+            self.assertEqual(self._titles(m1, q), ["ООО «Ромашка»"], q)
+            self.assertEqual(self._titles(m2, q), ["ООО РОМАШКА 1 подъезд", "ООО РОМАШКА 2 подъезд"], q)
+        self.assertEqual(self._titles(m1, "альфа"), ["Альфа ЛТД"])
+        self.assertEqual(self._titles(m2, "альфаа"), ["Альфа ЛТД 1 подъезд", "Альфа ЛТД 2 подъезд"])
+        self.assertEqual(self._titles(m1, "продукты"), ["Магазин «ПРОДУКТЫ»"])
+        self.assertEqual(self._titles(m2, "аптека"), ["АПТЕКА"])
+        self.assertEqual(self._titles(m2, "пекарня"), ["Добрая Пекарня"])
+        self.assertEqual(self._titles(m2, "добрая"), ["Добрая Пекарня"])
+        self.assertEqual(self._titles(m2, "добрая пекарня"), ["Добрая Пекарня"])
         for q in ["ц", "цоколь", "кв", "12", "2ц", "abc", "ооо"]:
             self.assertIsNone(self._titles(m2, q), q)
 
     def test_custom_alias_file(self):
         import json
-        from ledgers import load_aliases
         tmp = Path(tempfile.mkdtemp())
         try:
-            (tmp / "a.json").write_text(json.dumps({"*": {"овощи": "овощной"}, "2": {"лавочка": "лавка"}}),
-                                        encoding="utf-8")
-            al = load_aliases(tmp / "a.json")
-            self.assertEqual(self._titles(self._m(VOLKOVA_COMMERCE, al["*"]), "овощи"), ["Магазин «ОВОЩНОЙ»"])
-            self.assertEqual(self._titles(self._m(HIMIKOV_COMMERCE, al["2"]), "лавочка"), ["Щедрая Лавка"])
+            data = json.loads((FIXTURES / "houses.json").read_text(encoding="utf-8"))
+            data["aliases"] = {"_comment": "x", "*": {"еда": "продукты"}, "2": {"булочная": "пекарня"}}
+            (tmp / "h.json").write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+            _, al = config.load_houses(tmp / "h.json")
+            self.assertNotIn("_comment", al)
+            self.assertEqual(self._titles(self._m(HOUSE1_COMMERCE, al["*"]), "еда"), ["Магазин «ПРОДУКТЫ»"])
+            self.assertEqual(self._titles(self._m(HOUSE2_COMMERCE, al["2"]), "булочная"), ["Добрая Пекарня"])
+            self.assertIn("лютик", config.DEFAULT_ALIASES["*"])  # стартовые — из houses.json
             (tmp / "bad.json").write_text("{oops", encoding="utf-8")
-            self.assertIn("лекс", load_aliases(tmp / "bad.json")["*"])  # битый файл -> встроенные
+            with self.assertRaises(config.ConfigError):  # битый файл — понятная ошибка, а не тихий откат
+                config.load_houses(tmp / "bad.json")
         finally:
             shutil.rmtree(tmp)
 
     def test_mixed_parse_and_entrances(self):
-        m1, m2 = self._m(VOLKOVA_COMMERCE), self._m(HIMIKOV_COMMERCE)
-        r = parse_readings("12 345 лекс 67 пост 420 5ц 10", m1)
+        m1, m2 = self._m(HOUSE1_COMMERCE), self._m(HOUSE2_COMMERCE)
+        r = parse_readings("12 345 лютик 67 альфа 420 5ц 10", m1)
         self.assertEqual(r.entries, [("12", 345.0), ("5ц", 10.0)])
-        self.assertEqual([(m1.titles[k], v) for k, v, _ in r.commerce], [("ООО «Борис»", 67), ("Пост ЛТД", 420)])
+        self.assertEqual([(m1.titles[k], v) for k, v, _ in r.commerce], [("ООО «Ромашка»", 67), ("Альфа ЛТД", 420)])
         self.assertEqual(r.errors, [])
-        r = parse_readings("лекс 1 67 лекс1 68 лекс 2п 69 пост 2 подъезд 5 цоколь 2 345", m2)
+        r = parse_readings("лютик 1 67 лютик1 68 лютик 2п 69 альфа 2 подъезд 5 цоколь 2 345", m2)
         self.assertEqual([(m2.titles[k], v) for k, v, _ in r.commerce],
-                         [("ООО БОРИС 1 подъезд", 67), ("ООО БОРИС 1 подъезд", 68),
-                          ("ООО БОРИС 2 подъезд", 69), ("Пост ЛТД 2 подъезд", 5)])
+                         [("ООО РОМАШКА 1 подъезд", 67), ("ООО РОМАШКА 1 подъезд", 68),
+                          ("ООО РОМАШКА 2 подъезд", 69), ("Альфа ЛТД 2 подъезд", 5)])
         self.assertEqual(r.entries, [("2ц", 345.0)])
-        r = parse_readings("12 345 лекс 67 пост 420", m2)
+        r = parse_readings("12 345 лютик 67 альфа 420", m2)
         self.assertEqual(r.entries, [("12", 345.0)])
         self.assertEqual([(a["raw"], a["value"], len(a["candidates"])) for a in r.ambiguous],
-                         [("лекс", 67, 2), ("пост", 420, 2)])
+                         [("лютик", 67, 2), ("альфа", 420, 2)])
         self.assertEqual(parse_readings("1 100,5 2 200.25").entries, [("1", 100.5), ("2", 200.25)])
 
 
@@ -773,40 +841,40 @@ class TestCommerceBot(FakeTelegram, Base):
         import bot
         run = asyncio.run
         ctx = self._ctx()
-        u = self._update("Химиков 4")
+        u = self._update("Дом 2")
         run(bot.handle_message(u, ctx))
         self.assertEqual(self._labels(u), ["Жилые", "Коммерция", "Назад"])
         u = self._update("Коммерция")
         run(bot.handle_message(u, ctx))
         self.assertIn("Коммерция", u.message.reply_text.call_args[0][0])
-        self.assertEqual(self._labels(u), HIMIKOV_COMMERCE + ["Файл сейчас", "Готово", "Назад"])
+        self.assertEqual(self._labels(u), HOUSE2_COMMERCE + ["Файл сейчас", "Готово", "Назад"])
         sess = self.db.get_session(5)
         self.assertEqual((sess.house_id, sess.kind), (2, "commerce"))
-        ozon = key_of(self.db, 2, "ОЗОН")
+        pharmacy = key_of(self.db, 2, "АПТЕКА")
         from db import previous_period
-        self.db.save_reading(2, ozon, previous_period(sess.period), 60497, 1, kind="commerce")
+        self.db.save_reading(2, pharmacy, previous_period(sess.period), 60497, 1, kind="commerce")
 
-        u = self._update("ОЗОН")
+        u = self._update("АПТЕКА")
         run(bot.handle_message(u, ctx))
         self.assertIn("60497", u.message.reply_text.call_args[0][0])
-        self.assertEqual(self.db.get_session(5).pending_apartment, ozon)
+        self.assertEqual(self.db.get_session(5).pending_apartment, pharmacy)
 
         ctx = self._restart(ctx)  # выбор абонента переживает перезапуск
         u = self._update("60500")
         run(bot.handle_message(u, ctx))
         reply = u.message.reply_text.call_args[0][0]
-        self.assertIn("ОЗОН: сохранено 60500 (расход 3)", reply)
-        self.assertIn("✅ ОЗОН", self._labels(u))
-        self.assertIn("Щедрая Лавка", self._labels(u))
+        self.assertIn("АПТЕКА: сохранено 60500 (расход 3)", reply)
+        self.assertIn("✅ АПТЕКА", self._labels(u))
+        self.assertIn("Добрая Пекарня", self._labels(u))
 
-        u = self._update("ОЗОН")       # кнопка без ✅ тоже работает, "✅ ОЗОН" — тоже
-        run(bot.handle_message(self._update("✅ ОЗОН"), ctx))
+        u = self._update("АПТЕКА")       # кнопка без ✅ тоже работает, "✅ АПТЕКА" — тоже
+        run(bot.handle_message(self._update("✅ АПТЕКА"), ctx))
         u = self._update("60400")
         run(bot.handle_message(u, ctx))
-        self.assertIn("ОЗОН: обновлено 60400", u.message.reply_text.call_args[0][0])
+        self.assertIn("АПТЕКА: обновлено 60400", u.message.reply_text.call_args[0][0])
         self.assertIn("меньше предыдущего", u.message.reply_text.call_args[0][0])
 
-        u = self._update("щедрая 70000,5\nпост 2 1700")
+        u = self._update("добрая 70000,5\nальфа 2 1700")
         run(bot.handle_message(u, ctx))
         self.assertIn("✅ Сохранено 2 абонента", u.message.reply_text.call_args[0][0])
         u = self._update("12 345")
@@ -818,8 +886,8 @@ class TestCommerceBot(FakeTelegram, Base):
         kw = ctx.bot.send_document.call_args.kwargs
         self.assertEqual(ctx.bot.send_document.await_count, 1)
         self.assertIn("— Коммерция", kw["caption"])
-        self.assertIn("#Химиков #Коммерция", kw["caption"])
-        self.assertRegex(kw["filename"], r"^\d{8}_\d{6}_house2_commerce_Химиков_4\.xlsx$")
+        self.assertIn("#Дом2 #Коммерция", kw["caption"])
+        self.assertRegex(kw["filename"], r"^\d{8}_\d{6}_house2_commerce_Дом_2\.xlsx$")
         self.assertTrue(self.db.is_submitted(2, sess.period, "commerce"))
         self.assertFalse(self.db.is_submitted(2, sess.period, "residential"))
         self.assertIsNone(self.db.get_session(5))
@@ -828,18 +896,19 @@ class TestCommerceBot(FakeTelegram, Base):
         import bot
         run = asyncio.run
         ctx = self._ctx()
-        u = self._open(ctx, "Волкова д.9 к.1")
+        u = self._open(ctx, "Дом 1")
         self.assertIn("Коммерцию можно писать прямо здесь", u.message.reply_text.call_args[0][0])
-        u = self._update("12 345 лекс 67 пост 420 4ц 10")
+        self.assertIn("укажи номер: «лютик 1 67»", u.message.reply_text.call_args[0][0])  # первый псевдоним
+        u = self._update("12 345 лютик 67 альфа 420 4ц 10")
         run(bot.handle_message(u, ctx))
         reply = u.message.reply_text.call_args[0][0]
         self.assertIn("✅ Сохранено 2 квартиры", reply)
-        self.assertIn("Коммерция: ООО «Борис» — 67", reply)
-        self.assertIn("Коммерция: Пост ЛТД — 420", reply)
+        self.assertIn("Коммерция: ООО «Ромашка» — 67", reply)
+        self.assertIn("Коммерция: Альфа ЛТД — 420", reply)
         period = self.db.get_session(5).period
         self.assertEqual(self.db.get_readings(1, period), {"12": 345, "4ц": 10})
         com = self.db.get_readings(1, period, "commerce")
-        self.assertEqual(com[key_of(self.db, 1, "ООО «Борис»")], 67)
+        self.assertEqual(com[key_of(self.db, 1, "ООО «Ромашка»")], 67)
 
         u = self._update("Файл сейчас")
         run(bot.handle_message(u, ctx))
@@ -859,7 +928,7 @@ class TestCommerceBot(FakeTelegram, Base):
         self.assertEqual((ws["E7"].value, ws["E8"].value), (67, 420))
 
         # Следующая жилая сессия без новой коммерции — уходит только жилой файл
-        self._open(ctx, "Волкова д.9 к.1")
+        self._open(ctx, "Дом 1")
         run(bot.handle_message(self._update("1 13100"), ctx))
         run(bot.handle_message(self._update("Готово"), ctx))
         self.assertEqual(ctx.bot.send_document.await_count, 3)
@@ -868,13 +937,13 @@ class TestCommerceBot(FakeTelegram, Base):
         import bot
         run = asyncio.run
         ctx = self._ctx()
-        self._open(ctx, "Химиков 4")
-        u = self._update("1 100 лекс 67 пост 420")
+        self._open(ctx, "Дом 2")
+        u = self._update("1 100 лютик 67 альфа 420")
         run(bot.handle_message(u, ctx))
         texts = [c[0][0] for c in u.message.reply_text.call_args_list]
         self.assertIn("✅ Сохранено 1 квартира", texts[0])
-        self.assertIn("«лекс 67» — какой именно?", texts[1])
-        self.assertEqual(self._labels(u), ["ООО БОРИС 1 подъезд", "ООО БОРИС 2 подъезд", "Назад"])
+        self.assertIn("«лютик 67» — какой именно?", texts[1])
+        self.assertEqual(self._labels(u), ["ООО РОМАШКА 1 подъезд", "ООО РОМАШКА 2 подъезд", "Назад"])
         period = self.db.get_session(5).period
         self.assertEqual(self.db.get_readings(2, period, "commerce"), {})  # ничего не сохранено
 
@@ -884,36 +953,36 @@ class TestCommerceBot(FakeTelegram, Base):
         self.assertEqual(ctx.bot.send_document.await_count, 0)
 
         ctx = self._restart(ctx)
-        u = self._update("ООО БОРИС 2 подъезд")
+        u = self._update("ООО РОМАШКА 2 подъезд")
         run(bot.handle_message(u, ctx))
         texts = [c[0][0] for c in u.message.reply_text.call_args_list]
-        self.assertIn("Коммерция: ООО БОРИС 2 подъезд — 67", texts[0])
-        self.assertIn("«пост 420» — какой именно?", texts[1])
+        self.assertIn("Коммерция: ООО РОМАШКА 2 подъезд — 67", texts[0])
+        self.assertIn("«альфа 420» — какой именно?", texts[1])
         u = self._update("1")  # номер подъезда текстом
         run(bot.handle_message(u, ctx))
-        self.assertIn("Коммерция: Пост ЛТД 1 подъезд — 420", u.message.reply_text.call_args[0][0])
+        self.assertIn("Коммерция: Альфа ЛТД 1 подъезд — 420", u.message.reply_text.call_args[0][0])
         com = self.db.get_readings(2, period, "commerce")
-        self.assertEqual(com, {key_of(self.db, 2, "ООО БОРИС 2 подъезд"): 67,
-                               key_of(self.db, 2, "Пост ЛТД 1 подъезд"): 420})
+        self.assertEqual(com, {key_of(self.db, 2, "ООО РОМАШКА 2 подъезд"): 67,
+                               key_of(self.db, 2, "Альфа ЛТД 1 подъезд"): 420})
         self.assertEqual(self.db.get_pending_choices(5), [])
 
         # «Назад» пропускает неоднозначную запись
-        run(bot.handle_message(self._update("лекс 70"), ctx))
+        run(bot.handle_message(self._update("лютик 70"), ctx))
         u = self._update("Назад")
         run(bot.handle_message(u, ctx))
-        self.assertIn("Пропустил «лекс 70»", u.message.reply_text.call_args_list[0][0][0])
+        self.assertIn("Пропустил «лютик 70»", u.message.reply_text.call_args_list[0][0][0])
         self.assertEqual(self.db.get_pending_choices(5), [])
 
     def test_kind_choice_after_restart_and_back(self):
         import bot
         run = asyncio.run
         ctx = self._ctx()
-        run(bot.handle_message(self._update("Химиков 4"), ctx))
+        run(bot.handle_message(self._update("Дом 2"), ctx))
         ctx = self._restart(ctx)  # выбор дома (до «Жилые/Коммерция») хранится в памяти
         u = self._update("Коммерция")
         run(bot.handle_message(u, ctx))
         self.assertIn("Сначала выбери дом", u.message.reply_text.call_args[0][0])
-        run(bot.handle_message(self._update("Химиков 4"), ctx))
+        run(bot.handle_message(self._update("Дом 2"), ctx))
         u = self._update("Назад")
         run(bot.handle_message(u, ctx))
         self.assertEqual(u.message.reply_text.call_args[0][0], "Выбери дом:")
@@ -922,7 +991,7 @@ class TestCommerceBot(FakeTelegram, Base):
         import bot
         (self.tmp / "template_2_commerce.xlsx").unlink()
         ctx = self._ctx()
-        u = self._update("Химиков 4")
+        u = self._update("Дом 2")
         asyncio.run(bot.handle_message(u, ctx))
         self.assertIn("Сессия начата", u.message.reply_text.call_args[0][0])
         self.assertEqual(self.db.get_session(5).kind, "residential")

@@ -1,22 +1,22 @@
-"""Номера квартир: нормализация ввода, «человеческие» названия, подсказки.
+"""Номера квартир: приводим ввод к одному виду, называем по-человечески и подсказываем похожие.
 
-Нестандартные квартиры — номера, которые не состоят только из цифр (например «2ц» = цоколь 2).
-Список берётся из шаблонов/БД, поэтому всё работает для любого дома.
+Нестандартные квартиры — с буквами в номере (например «2ц» = цоколь 2). Список берётся
+из шаблонов, так что всё работает для любого дома.
 """
 from __future__ import annotations
 
 import re
 
-# Суффикс -> человеческое название ("2ц" -> "Цоколь 2"). Неизвестные суффиксы показываются как "Кв. 15а".
+# Буква-суффикс → понятное название («2ц» → «Цоколь 2»). Остальные показываем как «Кв. 15а».
 SUFFIX_NAMES = {"ц": "Цоколь"}
 
-# Слова, которые пользователь может написать вместо буквы-суффикса.
+# Слова, которые можно написать вместо буквы-суффикса.
 _WORD_ALIASES = [
     (re.compile(r"цокол[а-яё]*"), "ц"),
     (re.compile(r"цок"), "ц"),
 ]
 
-# Латинские буквы, похожие на кириллические.
+# Латинские буквы, которые выглядят как русские.
 _LATIN_TO_CYR = str.maketrans({
     "a": "а", "e": "е", "o": "о", "p": "р", "c": "с", "x": "х", "y": "у",
     "k": "к", "m": "м", "h": "н", "b": "в", "t": "т",
@@ -32,6 +32,7 @@ _AFFIX_TOKEN = re.compile(r"^[а-я]{1,2}$")
 
 
 def _letters(text: str) -> str:
+    """Нижний регистр, латиница → кириллица, «цоколь» → «ц»."""
     text = text.lower().replace("ё", "е")
     text = _LATIN_SUFFIX_TS.sub("ц", text)
     text = text.translate(_LATIN_TO_CYR)
@@ -41,10 +42,10 @@ def _letters(text: str) -> str:
 
 
 def normalize_apartment(value) -> str | None:
-    """Приводит номер квартиры (из ячейки шаблона или сообщения) к каноническому виду.
+    """Приводит номер квартиры (из шаблона или сообщения) к одному виду.
 
-    "2ц", "2 Ц", "2-ц", "2c", "2u", "ц2", "цоколь 2", "2цоколь" -> "2ц";  12 / 12.0 / "12" -> "12".
-    Возвращает None, если это не номер квартиры (сноски, итоги и т.п.).
+    «2ц», «2 Ц», «2-ц», «2c», «2u», «ц2», «цоколь 2», «2цоколь» → «2ц»; 12 / 12.0 / «12» → «12».
+    None — если это вообще не номер (сноска, итог и т.п.).
     """
     if value is None or isinstance(value, bool):
         return None
@@ -69,7 +70,7 @@ def normalize_apartment(value) -> str | None:
 
 
 def is_affix_token(token: str) -> bool:
-    """Отдельное слово-суффикс/префикс без цифр: "ц", "Ц", "цоколь", "c" и т.п."""
+    """Это отдельное слово-приставка к номеру без цифр? «ц», «Ц», «цоколь», «c» и т.п."""
     if any(ch.isdigit() for ch in token):
         return False
     if token.strip().lower() in ("c", "u"):  # латинские c/u как отдельное слово: "2 c 345"
@@ -79,11 +80,12 @@ def is_affix_token(token: str) -> bool:
 
 
 def is_nonstandard(number: str) -> bool:
+    """В номере есть не только цифры (например «2ц»)."""
     return not number.isdigit()
 
 
 def natural_key(number: str) -> tuple[int, str]:
-    """Естественная сортировка: "2ц" < "3ц" < "10ц"."""
+    """Ключ для сортировки «по-человечески»: «2ц» < «3ц» < «10ц»."""
     digits, suffix = split_number(number)
     return (int(digits) if digits.isdigit() else 10**9, suffix)
 
@@ -103,12 +105,13 @@ def apartments_count(n: int) -> str:
 
 
 def split_number(number: str) -> tuple[str, str]:
+    """«15а» → («15», «а»)."""
     m = re.match(r"^(\d+)(.*)$", number)
     return (m.group(1), m.group(2)) if m else (number, "")
 
 
 def apartment_label(number: str) -> str:
-    """Название для кнопок и сообщений: "2ц" -> "Цоколь 2", "15а" -> "Кв. 15а", "5" -> "Кв. 5"."""
+    """Название для кнопок и сообщений: «2ц» → «Цоколь 2», «15а» → «Кв. 15а», «5» → «Кв. 5»."""
     digits, suffix = split_number(number)
     if suffix in SUFFIX_NAMES:
         return f"{SUFFIX_NAMES[suffix]} {digits}"
@@ -116,7 +119,7 @@ def apartment_label(number: str) -> str:
 
 
 def apartment_ref(number: str) -> str:
-    """Короткая ссылка в подсказках: "4ц (Цоколь 4)" или просто "5"."""
+    """Как назвать квартиру в подсказке: «4ц (Цоколь 4)» или просто «5»."""
     digits, suffix = split_number(number)
     if suffix in SUFFIX_NAMES:
         return f"{number} ({SUFFIX_NAMES[suffix]} {digits})"
@@ -124,6 +127,7 @@ def apartment_ref(number: str) -> str:
 
 
 def input_example(number: str, value: str = "345") -> str:
+    """Пример ввода для подсказки: «2ц 345» или «цоколь 2 345»."""
     digits, suffix = split_number(number)
     if suffix in SUFFIX_NAMES:
         return f"«{number} {value}» или «{SUFFIX_NAMES[suffix].lower()} {digits} {value}»"
@@ -131,7 +135,7 @@ def input_example(number: str, value: str = "345") -> str:
 
 
 def suggest_apartments(number: str, existing: list[str], limit: int = 3) -> list[str]:
-    """Похожие существующие квартиры: та же цифра с другим суффиксом, тот же суффикс ±1."""
+    """Похожие квартиры, если ввели несуществующую: тот же номер с другой буквой или соседний номер."""
     existing_set = set(existing)
     digits, suffix = split_number(number)
     out: list[str] = []
@@ -156,6 +160,7 @@ def suggest_apartments(number: str, existing: list[str], limit: int = 3) -> list
 
 
 def format_suggestions(candidates: list[str]) -> str:
+    """«Может, 4ц (Цоколь 4) или 5?» — или пустая строка, если предложить нечего."""
     refs = [apartment_ref(c) for c in candidates]
     if not refs:
         return ""

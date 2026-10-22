@@ -1,9 +1,9 @@
-"""Работа с Excel-шаблонами: чтение строк (квартиры / абоненты) и генерация ведомости из БД.
+"""Excel: читаем строки из шаблонов и собираем из БД готовую ведомость.
 
-Разметка задаётся ведомостью (ledgers.Ledger):
-  * жилые:     строка 4 — месяцы (D/E), данные с 5-й строки, в A номер квартиры, F — расход числом;
-  * коммерция: строка 5 — месяцы (D/E), данные с 6-й строки, в A название абонента, F — формула шаблона.
-D2 — дата. Остальные ячейки шаблона не меняются.
+Разметка зависит от ведомости (ledgers.Ledger):
+  * жилые — месяцы в строке 4 (D/E), данные с 5-й строки, в A номер квартиры, в F расход числом;
+  * коммерция — месяцы в строке 5, данные с 6-й, в A название абонента, в F формула из шаблона.
+В D2 — дата. Всё остальное в шаблоне остаётся как было.
 """
 from __future__ import annotations
 
@@ -27,13 +27,13 @@ __all__ = ["normalize_apartment", "read_apartment_rows", "read_rows", "read_shee
 
 
 def _load(path: Path, **kwargs):
-    # Открываем файл сами, чтобы гарантированно закрыть дескриптор.
+    # Читаем файл сами — так дескриптор точно закроется.
     with open(path, "rb") as fh:
         return load_workbook(io.BytesIO(fh.read()), **kwargs)
 
 
 def pick_sheet(wb):
-    """Лист с данными: первый непустой (а не wb.active вслепую — в шаблоне может быть пустой «Лист1»)."""
+    """Первый непустой лист. wb.active не годится — в шаблоне бывает пустой «Лист1»."""
     for ws in wb.worksheets:
         if any(c.value is not None for row in ws.iter_rows(min_row=1, max_row=12, max_col=6) for c in row):
             return ws
@@ -47,7 +47,8 @@ def _ledger(ledger: Ledger | str | None) -> Ledger:
 
 
 def _rows(ws, ledger: Ledger) -> list[tuple[str, int, str]]:
-    """[(ключ, строка, название), ...]; название: у коммерции — колонка A, у квартир — ФИО из колонки B."""
+    """[(ключ, строка, название), ...]. Название: у коммерции — из колонки A, у квартир — ФИО из B.
+    Сноски (строки на «*») и повторы пропускаем."""
     rows, seen = [], set()
     for row in range(ledger.first_row, ws.max_row + 1):
         raw = ws.cell(row=row, column=COL_APT).value
@@ -64,6 +65,7 @@ def _rows(ws, ledger: Ledger) -> list[tuple[str, int, str]]:
 
 
 def read_rows(path: Path, ledger: Ledger | str | None = None) -> list[tuple[str, int, str]]:
+    """Строки ведомости из файла: [(ключ, строка, название), ...]."""
     wb = _load(path, data_only=True)
     try:
         return _rows(pick_sheet(wb), _ledger(ledger))
@@ -72,7 +74,7 @@ def read_rows(path: Path, ledger: Ledger | str | None = None) -> list[tuple[str,
 
 
 def read_apartment_rows(path: Path) -> list[tuple[str, int]]:
-    """[(номер квартиры, номер строки), ...] жилого шаблона/файла."""
+    """[(номер квартиры, номер строки), ...] из жилого шаблона или файла."""
     return [(k, r) for k, r, _ in read_rows(path, RESIDENTIAL)]
 
 
@@ -87,7 +89,7 @@ def _month_index(name) -> int | None:
 
 
 def read_sheet_values(path: Path, ledger: Ledger | str | None = None) -> dict:
-    """Читает файл ведомости (архив или шаблон).
+    """Достаёт данные из готовой ведомости (архивной или шаблона).
 
     Возвращает {"date": D2 или None, "prev_month": 1..12|None, "cur_month": 1..12|None,
                 "prev": {ключ: значение}, "cur": {ключ: значение}}.
@@ -122,6 +124,7 @@ def read_sheet_values(path: Path, ledger: Ledger | str | None = None) -> dict:
 
 
 def _num(value: float | None):
+    """Число для ячейки: 12.0 → 12, дробные округляем до 3 знаков."""
     if value is None:
         return None
     return int(value) if float(value).is_integer() else round(float(value), 3)
@@ -129,7 +132,7 @@ def _num(value: float | None):
 
 @dataclass
 class SheetRow:
-    """Строка для записи в ведомость."""
+    """Одна строка, которую надо записать в ведомость."""
     key: str
     row: int | None          # строка шаблона; None — добавлен в админке, строки в шаблоне нет
     prev: float | None
@@ -149,13 +152,12 @@ def _copy_style(ws, src_row: int, dst_row: int):
 def build_workbook(template_path: Path, year: int, month: int,
                    prev_values: dict[str, float] | None = None, cur_values: dict[str, float] | None = None,
                    ledger: Ledger | str | None = None, rows: list[SheetRow] | None = None) -> bytes:
-    """Генерирует xlsx (байты) по шаблону: D = прошлый месяц, E = текущий, F = расход.
+    """Собирает xlsx (байты) по шаблону: D — прошлый месяц, E — текущий, F — расход.
 
-    rows — строки из БД (номер строки шаблона, значения, название для периода). Если rows не
-    переданы, строки берутся из самого шаблона и значения — из prev_values/cur_values.
-    Старые значения D/E шаблона очищаются во всех строках данных; шапка, сноски и итоги не меняются.
-    У коммерции F не трогаем — там формула =E-D из шаблона. Строки, добавленные в админке
-    (нет в шаблоне), дописываются в конец листа со стилем первой строки данных.
+    rows — строки из БД. Если их не передали, строки берутся из шаблона, а значения — из
+    prev_values/cur_values. Старые D/E шаблона стираются; шапка, сноски и итоги не трогаются.
+    У коммерции F не пишем — там формула =E-D. Строки, добавленные в админке, дописываются
+    в конец листа со стилем первой строки данных.
     """
     ledger = _ledger(ledger)
     wb = _load(template_path)
@@ -170,7 +172,7 @@ def build_workbook(template_path: Path, year: int, month: int,
         if rows is None:
             prev_values, cur_values = prev_values or {}, cur_values or {}
             rows = [SheetRow(k, r, prev_values.get(k), cur_values.get(k)) for k, r, _ in template_rows]
-        for _, r, _ in template_rows:  # очистить значения шаблона
+        for _, r, _ in template_rows:  # стираем старые значения шаблона
             ws.cell(row=r, column=COL_PREV).value = None
             ws.cell(row=r, column=COL_CUR).value = None
             if ledger.write_diff:
@@ -180,7 +182,7 @@ def build_workbook(template_path: Path, year: int, month: int,
         next_free = ws.max_row + 1
         for item in rows:
             r = item.row
-            if not r:
+            if not r:  # строки нет в шаблоне (добавлена в админке) — дописываем в конец
                 r, next_free = next_free, next_free + 1
                 _copy_style(ws, style_row, r)
                 if ledger.key_mode == "apartment":

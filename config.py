@@ -1,36 +1,104 @@
-"""Загрузка и проверка настроек из .env / переменных окружения."""
+"""Настройки бота и админки: читаем .env, проверяем и складываем в удобные объекты.
+
+Список домов (HOUSES) и стартовые псевдонимы абонентов берутся из локального файла houses.json
+(путь можно поменять через HOUSES_FILE). Образец — houses.example.json.
+"""
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from dotenv import load_dotenv
+from dotenv import dotenv_values, load_dotenv
 
 logger = logging.getLogger(__name__)
 
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_DATABASE_URL = "sqlite:///data/electionbot.db"
 
-# Справочник домов. Ключ = номер дома в боте (как в старом коде: house1/house2).
-# template — жилые квартиры, commerce_template — коммерческие абоненты (необязательно).
-HOUSES = {
-    1: {"name": "Волкова д.9 к.1", "hashtag": "#Волкова", "template": "template_1.xlsx",
-        "commerce_template": "template_1_commerce.xlsx"},
-    2: {"name": "Химиков 4", "hashtag": "#Химиков", "template": "template_2.xlsx",
-        "commerce_template": "template_2_commerce.xlsx"},
-}
-
-# Файл с псевдонимами коммерческих абонентов (см. README). Если файла нет — встроенные значения.
-ALIASES_FILE = BASE_DIR / "aliases.json"
+DEFAULT_HOUSES_FILE = "houses.json"
 
 _TOKEN_RE = re.compile(r"^\d+:[A-Za-z0-9_-]{20,}$")
 
 
 class ConfigError(Exception):
-    """Ошибка конфигурации (бот не должен стартовать)."""
+    """С такими настройками запускаться нельзя."""
+
+
+# ---------------------------------------------------------------- дома (houses.json)
+def houses_file_path() -> Path:
+    """Где лежит файл с домами: HOUSES_FILE из окружения или .env, иначе houses.json в папке бота."""
+    raw = (os.getenv("HOUSES_FILE") or dotenv_values(BASE_DIR / ".env").get("HOUSES_FILE") or "").strip()
+    path = Path(raw or DEFAULT_HOUSES_FILE)
+    return path if path.is_absolute() else BASE_DIR / path
+
+
+def parse_aliases(raw, house_ids, source: str = "houses.json") -> dict[str, dict[str, str]]:
+    """Раздел «aliases»: {"*": {псевдоним: фраза}, "1": {...}}. Ключи на «_» (комментарии) пропускаем."""
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ConfigError(f"{source}: «aliases» должен быть объектом (см. houses.example.json)")
+    out: dict[str, dict[str, str]] = {}
+    for scope, mapping in raw.items():
+        if scope.startswith("_"):
+            continue
+        if scope != "*" and not (scope.isdigit() and int(scope) in house_ids):
+            raise ConfigError(f"{source}: в «aliases» неизвестный дом «{scope}» (нужно «*» или номер дома)")
+        if not isinstance(mapping, dict):
+            raise ConfigError(f"{source}: aliases[{scope!r}] должен быть объектом {{псевдоним: фраза}}")
+        out[scope] = {str(a): str(t) for a, t in mapping.items() if not str(a).startswith("_")}
+    return out
+
+
+def load_houses(path: Path) -> tuple[dict[int, dict[str, str]], dict[str, dict[str, str]]]:
+    """Читает houses.json и возвращает (дома, стартовые псевдонимы).
+
+    Дома — {номер: {"name", "hashtag", "template", ["commerce_template"]}}. Номер дома — это id
+    в базе и house1/house2 в именах файлов, поэтому у работающего бота его менять нельзя.
+    """
+    path = Path(path)
+    if not path.exists():
+        raise ConfigError(f"не найден файл с домами {path}. Скопируйте houses.example.json в houses.json "
+                          f"и впишите свои дома (или укажите другой путь в HOUSES_FILE)")
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise ConfigError(f"не удалось прочитать {path}: {exc}") from exc
+    raw_houses = data.get("houses") if isinstance(data, dict) else None
+    if not isinstance(raw_houses, dict) or not any(not k.startswith("_") for k in raw_houses):
+        raise ConfigError(f"{path.name}: нет раздела «houses» со списком домов (см. houses.example.json)")
+    houses: dict[int, dict[str, str]] = {}
+    for key, info in raw_houses.items():
+        if key.startswith("_"):
+            continue
+        if not key.isdigit():
+            raise ConfigError(f"{path.name}: номер дома «{key}» должен быть числом (1, 2, …)")
+        if not isinstance(info, dict) or not all(isinstance(info.get(f), str) and info[f].strip()
+                                                 for f in ("name", "hashtag", "template")):
+            raise ConfigError(f"{path.name}: у дома {key} должны быть заполнены name, hashtag и template")
+        house = {f: info[f] for f in ("name", "hashtag", "template")}
+        if info.get("commerce_template"):
+            house["commerce_template"] = str(info["commerce_template"])
+        houses[int(key)] = house
+    names = [h["name"] for h in houses.values()]
+    if len(set(names)) != len(names):
+        raise ConfigError(f"{path.name}: названия домов должны быть разными")
+    houses = dict(sorted(houses.items()))
+    return houses, parse_aliases(data.get("aliases"), set(houses), path.name)
+
+
+HOUSES_FILE = houses_file_path()
+try:
+    # Дома: ключ — номер дома (id в БД, house1/house2 в именах файлов).
+    # DEFAULT_ALIASES — псевдонимы, которые один раз переносятся в БД при первом запуске.
+    HOUSES, DEFAULT_ALIASES = load_houses(HOUSES_FILE)
+except ConfigError as _exc:
+    # Без списка домов ни бот, ни админка работать не могут — выходим с понятным сообщением.
+    raise SystemExit(f"Ошибка конфигурации: {_exc}") from None
 
 
 @dataclass
@@ -45,7 +113,7 @@ class Settings:
 
 
 def resolve_database_url(url: str | None, base_dir: Path = BASE_DIR) -> str:
-    """Относительный путь SQLite считаем от папки бота и создаём каталог."""
+    """Относительный путь к SQLite считаем от папки бота и заодно создаём каталог для файла."""
     url = (url or "").strip() or DEFAULT_DATABASE_URL
     prefix = "sqlite:///"
     if url.startswith(prefix) and url != "sqlite:///:memory:":
@@ -59,6 +127,7 @@ def resolve_database_url(url: str | None, base_dir: Path = BASE_DIR) -> str:
 
 
 def parse_allowed_user_ids(raw: str | None, var: str = "ALLOWED_USER_IDS") -> frozenset[int]:
+    """«111, 222; 333» → {111, 222, 333}. Не число — ConfigError."""
     ids = set()
     for chunk in (raw or "").replace(";", ",").split(","):
         chunk = chunk.strip()
@@ -72,8 +141,10 @@ def parse_allowed_user_ids(raw: str | None, var: str = "ALLOWED_USER_IDS") -> fr
 
 
 def load_settings(require_telegram: bool = True) -> Settings:
+    """Настройки бота. require_telegram=False — для админки и миграции,
+    где BOT_TOKEN и GROUP_CHAT_ID не обязательны."""
     load_dotenv(BASE_DIR / ".env")
-    load_dotenv()  # .env в текущем каталоге (если запуск не из папки бота)
+    load_dotenv()  # плюс .env из текущей папки — на случай запуска не из папки бота
 
     token = (os.getenv("BOT_TOKEN") or "").strip()
     raw_chat = (os.getenv("GROUP_CHAT_ID") or "").strip()
@@ -125,7 +196,7 @@ class AdminSettings:
 
 
 def load_admin_settings() -> AdminSettings:
-    """Настройки админ-панели. Нужны BOT_TOKEN (проверка подписи Telegram) и ADMIN_SECRET_KEY."""
+    """Настройки админки. Обязательны BOT_TOKEN (им проверяем подпись Telegram) и ADMIN_SECRET_KEY."""
     load_dotenv(BASE_DIR / ".env")
     load_dotenv()
     errors = []

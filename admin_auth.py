@@ -1,12 +1,12 @@
-"""Проверка входа через Telegram для админ-панели.
+"""Проверяем, что вход в админку действительно пришёл от Telegram (подпись данных ботом).
 
-* Mini App (WebApp): https://core.telegram.org/bots/webapps#validating-data-received-via-the-mini-app
-    secret_key = HMAC_SHA256(key="WebAppData", msg=bot_token)
-    hash       = hex(HMAC_SHA256(key=secret_key, msg=data_check_string))
-* Login Widget: https://core.telegram.org/widgets/login#checking-authorization
-    secret_key = SHA256(bot_token)
-    hash       = hex(HMAC_SHA256(key=secret_key, msg=data_check_string))
-data_check_string — все поля, кроме hash (signature у Mini App ВКЛЮЧАЕТСЯ), «key=value», отсортированные по ключу, через \n.
+* Mini App:     secret = HMAC_SHA256(key="WebAppData", msg=bot_token)
+  https://core.telegram.org/bots/webapps#validating-data-received-via-the-mini-app
+* Login Widget: secret = SHA256(bot_token)
+  https://core.telegram.org/widgets/login#checking-authorization
+В обоих случаях hash = hex(HMAC_SHA256(key=secret, msg=data_check_string)), где data_check_string —
+все поля, кроме hash, в виде «key=value», по алфавиту, по одному на строку
+(поле signature у Mini App тоже входит).
 """
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ import json
 import time
 from urllib.parse import parse_qsl
 
-MAX_AGE_SECONDS = 24 * 3600  # initData / данные виджета не старше суток
+MAX_AGE_SECONDS = 24 * 3600  # данные входа принимаем не старше суток
 
 
 class AuthError(Exception):
@@ -24,10 +24,12 @@ class AuthError(Exception):
 
 
 def _check_string(fields: dict[str, str]) -> str:
+    """Строка для подписи: «key=value» по алфавиту, по одной на строку."""
     return "\n".join(f"{k}={fields[k]}" for k in sorted(fields))
 
 
 def _check_age(auth_date: str | None, max_age: int, now: float | None) -> None:
+    """auth_date не старше max_age и не из будущего (допуск 5 минут), иначе AuthError."""
     try:
         ts = int(auth_date or "")
     except ValueError as exc:
@@ -41,13 +43,12 @@ def _check_age(auth_date: str | None, max_age: int, now: float | None) -> None:
 
 def validate_webapp_init_data(init_data: str, bot_token: str, max_age: int = MAX_AGE_SECONDS,
                               now: float | None = None) -> dict:
-    """Возвращает словарь user из initData Mini App или бросает AuthError."""
+    """Проверяет initData из Mini App и возвращает словарь user. Что-то не так — AuthError."""
     if not init_data:
         raise AuthError("пустые initData")
     fields = dict(parse_qsl(init_data, keep_blank_values=True, strict_parsing=False))
     received = fields.pop("hash", "")
-    # signature (Ed25519 для сторонних проверок) НЕ исключается: по документации Telegram
-    # data_check_string для HMAC — все поля, кроме hash.
+    # signature не выкидываем: по документации Telegram в HMAC идут все поля, кроме hash.
     if not received:
         raise AuthError("нет hash")
     secret = hmac.new(b"WebAppData", bot_token.encode(), hashlib.sha256).digest()
@@ -65,7 +66,7 @@ def validate_webapp_init_data(init_data: str, bot_token: str, max_age: int = MAX
 
 def validate_login_widget(params: dict[str, str], bot_token: str, max_age: int = MAX_AGE_SECONDS,
                           now: float | None = None) -> int:
-    """Возвращает Telegram user_id из данных Login Widget или бросает AuthError."""
+    """Проверяет данные Login Widget и возвращает Telegram user_id. Что-то не так — AuthError."""
     fields = {k: v for k, v in params.items() if v is not None}
     received = fields.pop("hash", "")
     if not received:
@@ -81,7 +82,7 @@ def validate_login_widget(params: dict[str, str], bot_token: str, max_age: int =
         raise AuthError("нет id") from exc
 
 
-# ---------- для тестов и отладки: формирование корректно подписанных данных
+# ---------- для тестов и отладки: собираем правильно подписанные данные
 def sign_webapp_init_data(fields: dict[str, str], bot_token: str) -> str:
     from urllib.parse import urlencode
     secret = hmac.new(b"WebAppData", bot_token.encode(), hashlib.sha256).digest()
