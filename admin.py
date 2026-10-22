@@ -21,7 +21,7 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from admin_auth import AuthError, validate_login_widget, validate_webapp_init_data
 from apartments import apartment_label
-from captions import archive_file_name, build_caption
+from captions import archive_file_name, build_caption, content_disposition, display_file_name
 from config import BASE_DIR, HOUSES, AdminSettings, ConfigError, load_admin_settings, load_settings
 from crm_ingest import describe_config, push_ledger_ticket
 from logging_setup import add_secret, setup_logging
@@ -519,11 +519,9 @@ def create_app(db: Database, settings: AdminSettings, sender=None) -> FastAPI:
         if not db.has_ledger(house, kind):
             return Response("нет шаблона", status_code=404)
         data = db.build_excel(house, period, kind)
-        tag = "" if kind == RESIDENTIAL else "commerce_"
-        name = f"{period}_house{house}_{tag}{HOUSES[house]['name'].replace(' ', '_')}.xlsx"
+        # то же понятное имя, что в чате и в CRM: «Дом_1_Сентябрь_2026.xlsx»
         return Response(data, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        headers={"Content-Disposition": f"attachment; filename=\"house{house}_{period}.xlsx\"; "
-                                                        f"filename*=UTF-8''{quote(name)}"})
+                        headers={"Content-Disposition": content_disposition(display_file_name(house, period, kind))})
 
     # ------------------------------------------------------------ отправить в чат
     def resend_targets() -> list[dict]:
@@ -599,10 +597,11 @@ def create_app(db: Database, settings: AdminSettings, sender=None) -> FastAPI:
         house, kind, period = row.house_id, row.kind, row.period
         ticket_mode = row.mode == MODE_TICKET
         caption = build_caption(settings.target_bot_tag if ticket_mode else "", house, period, kind)
-        file_name = archive_file_name(house, kind=kind)
+        file_name = archive_file_name(house, kind=kind)       # служебное, уникальное — в журнал
+        shown_name = display_file_name(house, period, kind)   # что видят в чате и в CRM
         try:
             data = db.build_excel(house, period, kind)
-            message_id = await sender.send_document(settings.group_chat_id, data, file_name, caption)
+            message_id = await sender.send_document(settings.group_chat_id, data, shown_name, caption)
         except Exception as e:  # noqa: BLE001
             if is_timeout(e):
                 # Файл мог дойти: не «ошибка», а «неизвестно», и CRM не трогаем (нет message_id).
@@ -628,7 +627,7 @@ def create_app(db: Database, settings: AdminSettings, sender=None) -> FastAPI:
             res = await push_ledger_ticket(
                 settings.crm, db, house_id=house, house_name=HOUSES[house]["name"], period=period, kind=kind,
                 source="admin_resend", user_id=uid, author=row.requested_name or str(uid), text=caption,
-                chat_id=settings.group_chat_id, message_id=message_id, file_name=file_name, data=data,
+                chat_id=settings.group_chat_id, message_id=message_id, file_name=shown_name, data=data,
                 reply_to_ticket=row.reply_to_ticket)
             db.finish_resend(row.id, crm_status="ok" if res.ok else "error", crm_ticket_number=res.ticket_number,
                              crm_created=res.created, crm_message=res.summary()[:2000])

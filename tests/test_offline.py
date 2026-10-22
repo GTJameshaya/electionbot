@@ -343,7 +343,12 @@ class TestBotHandlers(FakeTelegram, Base):
         self.assertIsNone(self.db.get_session(5))
         kwargs = ctx.bot.send_document.call_args.kwargs
         self.assertIn("#Дом2", kwargs["caption"])
-        self.assertRegex(kwargs["filename"], r"^\d{8}_\d{6}_house2_Дом_2\.xlsx$")
+        # в чат — понятное имя за отчётный месяц, в БД — служебное с отметкой времени
+        self.assertEqual(kwargs["filename"], f"Дом_2_{bot.period_title(sess.period).replace(' ', '_')}.xlsx")
+        with self.db.Session() as s:
+            names = [x.file_name for x in s.query(Submission).filter_by(status="sent")]
+        self.assertEqual(len(names), 1)
+        self.assertRegex(names[0], r"^\d{8}_\d{6}_house2_Дом_2\.xlsx$")
 
     def test_access_denied(self):
         import bot
@@ -887,7 +892,7 @@ class TestCommerceBot(FakeTelegram, Base):
         self.assertEqual(ctx.bot.send_document.await_count, 1)
         self.assertIn("— Коммерция", kw["caption"])
         self.assertIn("#Дом2 #Коммерция", kw["caption"])
-        self.assertRegex(kw["filename"], r"^\d{8}_\d{6}_house2_commerce_Дом_2\.xlsx$")
+        self.assertEqual(kw["filename"], f"Дом_2_Коммерция_{bot.period_title(sess.period).replace(' ', '_')}.xlsx")
         self.assertTrue(self.db.is_submitted(2, sess.period, "commerce"))
         self.assertFalse(self.db.is_submitted(2, sess.period, "residential"))
         self.assertIsNone(self.db.get_session(5))
@@ -920,7 +925,9 @@ class TestCommerceBot(FakeTelegram, Base):
         self.assertEqual(len(calls), 2)
         self.assertNotIn("Коммерция", calls[0].kwargs["caption"])
         self.assertIn("#Коммерция", calls[1].kwargs["caption"])
-        self.assertIn("_commerce_", calls[1].kwargs["filename"])
+        self.assertTrue(calls[0].kwargs["filename"].startswith("Дом_1_"))
+        self.assertNotIn("Коммерция", calls[0].kwargs["filename"])
+        self.assertTrue(calls[1].kwargs["filename"].startswith("Дом_1_Коммерция_"))
         self.assertIn("Коммерция тоже отправлена", u.message.reply_text.call_args[0][0])
         self.assertTrue(self.db.is_submitted(1, period, "commerce"))
         # Коммерческий файл содержит введённое, жилой — только квартиры

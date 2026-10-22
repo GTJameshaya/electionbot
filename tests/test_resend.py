@@ -202,7 +202,7 @@ class TestResendPlain(ResendBase):
         self.assertEqual(call["caption"], build_caption("", 1, OLD))
         self.assertTrue(call["caption"].startswith("Привет! Показания за текущий 05.2024 — Дом 1"))
         self.assertNotIn(TAG, call["caption"])
-        self.assertTrue(call["filename"].endswith("_house1_Дом_1.xlsx"))
+        self.assertEqual(call["filename"], "Дом_1_Май_2024.xlsx")     # месяц отчёта, не дата отправки
         ws = load_workbook(io.BytesIO(call["data"])).active
         self.assertIn(12000, [c.value for row in ws.iter_rows() for c in row])
         row = self.rows()[0]
@@ -220,7 +220,7 @@ class TestResendPlain(ResendBase):
         call = self.sender.calls[0]
         self.assertEqual(call["caption"], build_caption("", 1, OLD, "commerce"))
         self.assertIn("Коммерция", call["caption"])
-        self.assertIn("commerce", call["filename"])
+        self.assertEqual(call["filename"], "Дом_1_Коммерция_Май_2024.xlsx")
         self.assertEqual(self.rows()[0].kind, "commerce")
 
     def test_send_failure_logged_no_crm(self):

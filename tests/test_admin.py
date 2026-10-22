@@ -421,7 +421,9 @@ class TestSubmissionsMissingCharts(AdminBase):
         r = self.client.get(f"/download?house=1&kind=residential&period={p}")
         self.assertEqual(r.status_code, 200)
         self.assertIn("spreadsheetml", r.headers["content-type"])
-        self.assertIn("filename*=UTF-8''", r.headers["content-disposition"])
+        title = admin.period_title(p).replace(" ", "_")
+        from urllib.parse import quote
+        self.assertIn(f"filename*=UTF-8''{quote(f'Дом_1_{title}.xlsx', safe='')}", r.headers["content-disposition"])
         ws = pick_sheet(load_workbook(io.BytesIO(r.content)))
         self.assertEqual(ws.cell(5, 5).value, 123)
         r2 = self.client.get(f"/download?house=1&kind=residential&period={p}")  # повторно — тоже можно

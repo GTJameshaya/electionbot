@@ -13,7 +13,8 @@ from telegram import (InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
 from apartments import apartment_label, format_suggestions, input_example, plural_ru, suggest_apartments
-from captions import HOUSE_NAMES, archive_file_name, build_caption, ledger_suffix, period_label, period_title
+from captions import (HOUSE_NAMES, archive_file_name, build_caption, display_file_name, ledger_suffix,
+                      period_label, period_title)
 from config import DEFAULT_ALIASES, ConfigError, Settings, load_settings
 from crm_ingest import describe_config, push_ledger_ticket
 from db import ROLE_ADMIN, ROLE_USER, Database, current_period, previous_period
@@ -295,13 +296,14 @@ async def _send_ledger(context, settings, db, house_id, period, kind, user_id) -
     """Шлёт ведомость в группу. Возвращает (отправлено?, текст ошибки записи в БД или None).
     Если не отправилось — пишем неудачную попытку в журнал и пробрасываем ошибку дальше.
     После удачной отправки (если настроена CRM) создаём тикет или дописываем в уже существующий."""
-    file_name = archive_file_name(house_id, kind=kind)
+    file_name = archive_file_name(house_id, kind=kind)          # служебное, уникальное — в БД
+    shown_name = display_file_name(house_id, period, kind)      # что видят в чате и в CRM
     caption = build_caption(settings.target_bot_tag, house_id, period, kind)
     try:
         data = db.build_excel(house_id, period, kind)
         with io.BytesIO(data) as buf:
             sent = await context.bot.send_document(
-                settings.group_chat_id, buf, filename=file_name, caption=caption,
+                settings.group_chat_id, buf, filename=shown_name, caption=caption,
             )
     except Exception as e:
         db.mark_failed(house_id, period, user_id, file_name, str(e), kind=kind)
@@ -315,7 +317,7 @@ async def _send_ledger(context, settings, db, house_id, period, kind, user_id) -
     if settings.crm.enabled:
         # CRM — в фоне: человек сразу получает ответ, а медленная CRM ничего не задерживает.
         spawn_background(_push_to_crm(context, settings, db, house_id, period, kind, user_id, caption, sent,
-                                      file_name, data), f"CRM: дом {house_id}, {period}, {kind}")
+                                      shown_name, data), f"CRM: дом {house_id}, {period}, {kind}")
     return True, db_error
 
 
