@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}Кто не сдал{% endblock %}
+{% block content %}
+<h1>Кто не сдал</h1>
+<form method="get" class="filters"><label>Месяц
+  <select name="period" onchange="this.form.submit()">{% for p in periods %}<option value="{{ p }}" {{ 'selected' if p == period }}>{{ period_title(p) }}</option>{% endfor %}</select>
+</label><noscript><button>Показать</button></noscript></form>
+<div class="grid">
+{% for r in report %}
+<section class="card">
+  <h2>{{ HOUSES[r.house].name }} · {{ LEDGERS[r.kind].title }}</h2>
+  <p>Сдали <b>{{ r.done }}</b> из {{ r.total }}, не сдали <b class="{{ 'danger' if r.missing }}">{{ r.missing | length }}</b>
+    {% if r.submitted %}<span class="badge ok">отправлено</span>{% endif %}</p>
+  {% if r.missing %}<div class="chips">{% for m in r.missing %}<span class="chip">{{ m }}</span>{% endfor %}</div>
+  {% else %}<p class="ok-text">Все сдали ✅</p>{% endif %}
+  <p><a href="/readings?house={{ r.house }}&kind={{ r.kind }}&period={{ period }}">Открыть показания →</a></p>
+</section>
+{% endfor %}
+</div>
+{% endblock %}

@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% from "_filters.html" import filters %}
+{% block title %}Квартиры и абоненты{% endblock %}
+{% block content %}
+<h1>{{ 'Квартиры' if kind == 'residential' else 'Коммерческие абоненты' }}</h1>
+{{ filters('/items', house, kind, kinds=kinds) }}
+<div class="table-wrap"><table class="data">
+  <thead><tr><th>{{ '№' if kind == 'residential' else 'Название' }}</th>{% if kind == 'residential' %}<th>Владелец</th>{% endif %}
+    <th class="hide-sm">Строка шаблона</th><th>Статус</th><th></th></tr></thead>
+  {% for r in items %}
+  <tr class="{{ 'off' if r.item.disabled or not r.item.active }}">
+    <td><a href="/items/{{ r.item.id }}">{{ r.label }}</a></td>
+    {% if kind == 'residential' %}<td>{{ r.name or '' }}</td>{% endif %}
+    <td class="hide-sm">{{ r.item.row_order if r.item.row_order else 'добавлено вручную' }}</td>
+    <td>{% if r.item.disabled %}<span class="badge">отключено</span>{% elif not r.item.active %}<span class="badge warn">нет в шаблоне</span>{% else %}<span class="badge ok">активно</span>{% endif %}</td>
+    <td><form method="post" action="/items/{{ r.item.id }}/toggle"><input type="hidden" name="csrf" value="{{ csrf }}">
+      <button class="small">{{ 'Включить' if r.item.disabled else 'Отключить' }}</button></form></td>
+  </tr>{% endfor %}
+</table></div>
+<section class="card narrow">
+  <h2>Добавить</h2>
+  <form method="post" action="/items/add" class="stack">
+    <input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="house" value="{{ house }}"><input type="hidden" name="kind" value="{{ kind }}">
+    {% if kind == 'residential' %}
+      <label>Номер квартиры <input name="number" required placeholder="например 71 или 5ц"></label>
+      <label>Владелец <input name="title" placeholder="ФИО"></label>
+    {% else %}
+      <label>Название абонента <input name="number" required placeholder="ООО «Ромашка»"></label>
+    {% endif %}
+    <button>Добавить</button>
+    <p class="muted small">Добавленные вручную строки дописываются в конец листа Excel.</p>
+  </form>
+</section>
+{% endblock %}

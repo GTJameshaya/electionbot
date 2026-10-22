@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Сводка за {{ period_title(period) }}</h1>
+<div class="grid">
+{% for r in summary %}
+  <a class="card stat" href="/readings?house={{ r.house }}&kind={{ r.kind }}&period={{ period }}">
+    <div class="muted">{{ HOUSES[r.house].name }} · {{ LEDGERS[r.kind].title }}</div>
+    <div class="big">{{ r.done }} <span class="muted">из {{ r.total }}</span></div>
+    <div class="bar"><span style="width: {{ (100 * r.done / r.total) | round | int if r.total else 0 }}%"></span></div>
+    <div>{% if r.submitted %}<span class="badge ok">отправлено</span>{% else %}<span class="badge">не отправлено</span>{% endif %}
+      {% if r.missing %}<span class="badge warn">не сдали: {{ r.missing | length }}</span>{% endif %}</div>
+  </a>
+{% endfor %}
+</div>
+{% if pending %}
+<section class="card">
+  <h2>Ожидают доступа ({{ pending | length }})</h2>
+  {% for u in pending %}
+  <form method="post" action="/users/{{ u.user_id }}/role" class="row-form">
+    <input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="role" value="user">
+    <span>{{ u.display }} <span class="muted">· {{ u.user_id }}</span></span>
+    <button>Разрешить</button>
+  </form>
+  {% endfor %}
+</section>
+{% endif %}
+{% endblock %}

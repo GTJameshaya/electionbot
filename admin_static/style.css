@@ -1,0 +1,45 @@
+:root{--bg:#f5f6f8;--card:#fff;--text:#1d2330;--muted:#6b7280;--line:#e5e7eb;--accent:#2563eb;--ok:#16a34a;--warn:#d97706;--err:#dc2626}
+*{box-sizing:border-box}html{-webkit-text-size-adjust:100%}
+body{margin:0;font:15px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif;background:var(--bg);color:var(--text)}
+a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
+h1{font-size:1.45rem;margin:.2rem 0 1rem}h2{font-size:1.1rem;margin:0 0 .7rem}
+main{max-width:1150px;margin:0 auto;padding:1rem}
+.top{display:flex;align-items:center;gap:1rem;background:#111827;color:#fff;padding:.6rem 1rem;position:sticky;top:0;z-index:5;flex-wrap:wrap}
+.top .brand{color:#fff;font-weight:700}.top nav{display:flex;gap:.2rem;flex-wrap:wrap;align-items:center}
+.top nav a{color:#cbd5e1;padding:.35rem .6rem;border-radius:6px}.top nav a.active,.top nav a:hover{background:#1f2937;color:#fff;text-decoration:none}
+.burger{display:none;margin-left:auto;font-size:1.4rem;cursor:pointer}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:1rem;margin:0 0 1rem}
+.narrow{max-width:520px}.center{margin:3rem auto;text-align:center}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:1rem;margin-bottom:1rem}
+.stat{display:block;color:inherit}.stat:hover{text-decoration:none;border-color:var(--accent)}
+.big{font-size:1.9rem;font-weight:700;margin:.2rem 0}
+.bar{height:8px;background:var(--line);border-radius:4px;overflow:hidden;margin:.3rem 0 .6rem}.bar span{display:block;height:100%;background:var(--ok)}
+.muted{color:var(--muted)}.small{font-size:.85rem}.nowrap{white-space:nowrap}.danger{color:var(--err)}.ok-text{color:var(--ok)}
+.badge{display:inline-block;padding:.05rem .5rem;border-radius:999px;background:#eef2f7;color:#374151;font-size:.78rem}
+.badge.ok{background:#dcfce7;color:#166534}.badge.warn{background:#fef3c7;color:#92400e}.badge.err{background:#fee2e2;color:#991b1b}
+.flash{padding:.7rem 1rem;border-radius:10px;margin-bottom:1rem;background:#dcfce7;color:#14532d}
+.flash.error{background:#fee2e2;color:#7f1d1d}.flash.warn{background:#fef3c7;color:#78350f}
+.filters{display:flex;flex-wrap:wrap;gap:.6rem 1rem;align-items:end;margin-bottom:1rem}
+.filters label{display:flex;flex-direction:column;font-size:.8rem;color:var(--muted);gap:.2rem}
+select,input,button{font:inherit}select,input{padding:.45rem .55rem;border:1px solid #cbd5e1;border-radius:8px;background:#fff;min-width:0}
+button{padding:.45rem .8rem;border:0;border-radius:8px;background:var(--accent);color:#fff;cursor:pointer}
+button.small{padding:.25rem .6rem;font-size:.85rem;background:#e5e7eb;color:#111}
+button.link{background:none;color:var(--accent);padding:.2rem .3rem}button.link.danger{color:var(--err)}
+.top button.link{color:#cbd5e1}
+form.inline{display:inline}.stack{display:flex;flex-direction:column;gap:.7rem}.stack label{display:flex;flex-direction:column;gap:.25rem;font-size:.9rem}
+.row-form{display:flex;justify-content:space-between;align-items:center;gap:.5rem;padding:.4rem 0;border-bottom:1px solid var(--line)}
+.table-wrap{overflow-x:auto;background:var(--card);border:1px solid var(--line);border-radius:12px;margin-bottom:1rem}
+table.data{width:100%;border-collapse:collapse}table.data th,table.data td{padding:.45rem .6rem;border-bottom:1px solid var(--line);text-align:left;vertical-align:middle}
+table.data th{background:#f9fafb;font-size:.8rem;color:var(--muted);font-weight:600;position:sticky;top:0}
+table.data tr:last-child td{border-bottom:0}.num{text-align:right!important;white-space:nowrap}
+tr.neg td{background:#fef2f2}tr.neg td b{color:var(--err)}tr.off td{color:#9ca3af}
+.cell-form{display:flex;gap:.3rem;justify-content:flex-end}.cell-form input{width:7.5rem;text-align:right}.cell-form button{padding:.3rem .55rem}
+.chips{display:flex;flex-wrap:wrap;gap:.35rem}.chip{background:#fee2e2;color:#7f1d1d;border-radius:6px;padding:.1rem .45rem;font-size:.85rem}
+.steps{text-align:left;display:inline-block}
+.chart svg{width:100%;height:auto;display:block}.chart .axis{stroke:#cbd5e1}.chart text{font-size:11px;fill:#6b7280}
+.chart rect.b{fill:var(--accent)}.chart rect.b.neg{fill:var(--err)}.chart polyline{fill:none;stroke:#111827;stroke-width:2}
+@media (max-width:720px){
+  .burger{display:block}.top nav{display:none;width:100%;flex-direction:column;align-items:stretch}
+  #menu:checked~nav{display:flex}.hide-sm{display:none}main{padding:.7rem}.cell-form input{width:5.5rem}
+}
+table.data td:first-child{white-space:nowrap}

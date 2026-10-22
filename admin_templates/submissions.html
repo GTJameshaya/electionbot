@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% from "_filters.html" import filters %}
+{% block title %}Отправки{% endblock %}
+{% block content %}
+<h1>Отправки в группу</h1>
+<section class="card"><h2>Скачать ведомость</h2>
+  {{ filters('/download', house, kind, period, periods, extra='<button>⬇ Скачать Excel</button>') }}
+  <p class="muted small">Файл формируется из базы на лету — его можно скачивать сколько угодно раз.</p>
+</section>
+<div class="table-wrap"><table class="data">
+  <thead><tr><th>Когда (UTC)</th><th>Дом</th><th>Ведомость</th><th>Месяц</th><th class="hide-sm">Кто</th><th class="hide-sm">Файл</th><th>Статус</th><th></th></tr></thead>
+  {% for s in subs %}<tr class="{{ 'neg' if s.status == 'failed' }}">
+    <td class="nowrap">{{ s.submitted_at.strftime('%d.%m.%Y %H:%M') if s.submitted_at }}</td><td>{{ HOUSES[s.house_id].name if s.house_id in HOUSES else s.house_id }}</td>
+    <td>{{ LEDGERS[s.kind].title }}</td><td>{{ period_title(s.period) }}</td>
+    <td class="hide-sm">{{ users[s.submitted_by].display if s.submitted_by in users else (s.submitted_by or '—') }}</td>
+    <td class="hide-sm small">{{ s.file_name or '' }}{% if s.error %}<br><span class="danger">{{ s.error }}</span>{% endif %}</td>
+    <td>{% if s.status == 'failed' %}<span class="badge err">ошибка</span>{% elif s.source == 'archive' %}<span class="badge">архив</span>{% else %}<span class="badge ok">отправлено</span>{% endif %}</td>
+    <td><a href="/download?house={{ s.house_id }}&kind={{ s.kind }}&period={{ s.period }}" title="Скачать снова">⬇</a></td>
+  </tr>{% else %}<tr><td colspan="8" class="muted">Отправок пока не было</td></tr>{% endfor %}
+</table></div>
+{% endblock %}

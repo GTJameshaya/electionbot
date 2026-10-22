@@ -1,0 +1,25 @@
+{% macro filters(action, house, kind=None, period=None, periods=None, kinds=None, extra='') %}
+<form method="get" action="{{ action }}" class="filters">
+  <label>Дом
+    <select name="house" onchange="this.form.submit()">
+      {% for hid, h in HOUSES.items() %}<option value="{{ hid }}" {{ 'selected' if hid == house }}>{{ h.name }}</option>{% endfor %}
+    </select>
+  </label>
+  {% if kind is not none %}
+  <label>Ведомость
+    <select name="kind" onchange="this.form.submit()">
+      {% for k in (kinds or LEDGERS.keys()) %}<option value="{{ k }}" {{ 'selected' if k == kind }}>{{ LEDGERS[k].title }}</option>{% endfor %}
+    </select>
+  </label>
+  {% endif %}
+  {% if periods %}
+  <label>Месяц
+    <select name="period" onchange="this.form.submit()">
+      {% for p in periods %}<option value="{{ p }}" {{ 'selected' if p == period }}>{{ period_title(p) }}</option>{% endfor %}
+    </select>
+  </label>
+  {% endif %}
+  {{ extra | safe }}
+  <noscript><button>Показать</button></noscript>
+</form>
+{% endmacro %}

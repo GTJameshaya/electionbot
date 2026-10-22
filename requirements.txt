@@ -1,3 +1,14 @@
 python-telegram-bot==20.6
 openpyxl==3.1.2
 python-dotenv==1.0.0
+SQLAlchemy>=2.0.30,<2.1
+# Для PostgreSQL (DATABASE_URL=postgresql+psycopg://...) раскомментируйте:
+# psycopg[binary]>=3.1
+# Админ-панель (python admin.py)
+fastapi>=0.110,<1
+uvicorn>=0.29
+jinja2>=3.1
+itsdangerous>=2.1
+python-multipart>=0.0.9
+# Для тестов админки (TestClient); версия совместима с python-telegram-bot 20.6
+httpx~=0.25.2

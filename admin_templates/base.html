@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}Админ-панель{% endblock %} · Показания</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+{% if me and me.role == 'admin' %}
+<header class="top">
+  <a class="brand" href="/">⚡ Показания</a>
+  <input type="checkbox" id="menu" hidden><label for="menu" class="burger" aria-label="Меню">☰</label>
+  <nav>
+    {% set nav_items = [('index','/','Главная'),('readings','/readings','Показания'),('missing','/missing','Кто не сдал'),
+                    ('items','/items','Квартиры и абоненты'),('aliases','/aliases','Псевдонимы'),('users','/users','Пользователи'),
+                    ('submissions','/submissions','Отправки'),('charts','/charts','Графики')] %}
+    {% for key, url, title in nav_items %}<a href="{{ url }}" class="{{ 'active' if nav == key }}">{{ title }}</a>{% endfor %}
+    <form method="post" action="/logout" class="inline">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <button class="link" title="{{ me.display }}">Выйти</button>
+    </form>
+  </nav>
+</header>
+{% endif %}
+<main>
+{% if flash %}<div class="flash {{ flash[0] }}">{{ flash[1] }}</div>{% endif %}
+{% block content %}{% endblock %}
+</main>
+{% block scripts %}{% endblock %}
+</body>
+</html>

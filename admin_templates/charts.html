@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% from "_filters.html" import filters %}
+{% block title %}Графики{% endblock %}
+{% block content %}
+<h1>Потребление</h1>
+{% set extra %}<label>Строка <select name="item" onchange="this.form.submit()"><option value="">— итого по дому —</option>
+  {% for id, label in options %}<option value="{{ id }}" {{ 'selected' if id|string == item }}>{{ label }}</option>{% endfor %}</select></label>{% endset %}
+{{ filters('/charts', house, kind, kinds=kinds, extra=extra) }}
+<section class="card">
+  <h2 id="chart-title">{{ HOUSES[house].name }} · {{ LEDGERS[kind].title }}</h2>
+  <div id="chart" class="chart" data-url="{{ '/api/charts/item/' ~ item if item else '/api/charts/totals?house=' ~ house ~ '&kind=' ~ kind }}"
+       data-mode="{{ 'item' if item else 'totals' }}"><p class="muted">Загрузка…</p></div>
+</section>
+{% endblock %}
+{% block scripts %}<script src="/static/charts.js"></script>{% endblock %}

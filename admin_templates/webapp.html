@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block title %}Вход{% endblock %}
+{% block content %}
+<section class="card narrow center">
+  <h1>⚡ Админ-панель</h1>
+  <p id="status">Проверяю вход через Telegram…</p>
+</section>
+{% endblock %}
+{% block scripts %}
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<script>
+(function () {
+  var status = document.getElementById('status');
+  var tg = window.Telegram && window.Telegram.WebApp;
+  if (!tg || !tg.initData) { status.textContent = 'Откройте эту страницу кнопкой из бота (/admin).'; return; }
+  tg.ready(); tg.expand();
+  fetch('/auth/webapp', {method: 'POST', headers: {'Content-Type': 'application/json'},
+                         credentials: 'same-origin', body: JSON.stringify({init_data: tg.initData})})
+    .then(function (r) { return r.json(); })
+    .then(function (d) { if (d.ok) { location.replace(d.redirect); } else { status.textContent = d.error; } })
+    .catch(function () { status.textContent = 'Ошибка сети'; });
+})();
+</script>
+{% endblock %}

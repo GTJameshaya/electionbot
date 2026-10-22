@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block title %}Пользователи{% endblock %}
+{% block content %}
+<h1>Пользователи бота</h1>
+<p class="muted">Администратор — бот и админ-панель; пользователь — только бот; без роли — нет доступа.
+  Должен остаться хотя бы один администратор.</p>
+{% if pending %}
+<section class="card"><h2>Ожидают доступа</h2>
+  {% for u in pending %}<div class="row-form"><span>{{ u.display }} <span class="muted">· {{ u.user_id }} · {{ u.last_seen.strftime('%d.%m %H:%M') if u.last_seen }}</span></span>
+    <form method="post" action="/users/{{ u.user_id }}/role" class="inline"><input type="hidden" name="csrf" value="{{ csrf }}">
+      <button name="role" value="user">Разрешить</button></form></div>{% endfor %}
+</section>{% endif %}
+<div class="table-wrap"><table class="data">
+  <thead><tr><th>Пользователь</th><th>ID</th><th class="hide-sm">Первый / последний визит (UTC)</th><th class="hide-sm num">Сообщений</th><th>Роль</th></tr></thead>
+  {% for u in users %}<tr class="{{ 'off' if u.role == 'none' }}">
+    <td>{{ u.display }}{% if me and u.user_id == me.user_id %} <span class="badge">это вы</span>{% endif %}</td><td>{{ u.user_id }}</td>
+    <td class="hide-sm small">{{ u.first_seen.strftime('%d.%m.%Y') if u.first_seen else '—' }} / {{ u.last_seen.strftime('%d.%m.%Y %H:%M') if u.last_seen else '—' }}</td>
+    <td class="hide-sm num">{{ u.messages or 0 }}</td>
+    <td><form method="post" action="/users/{{ u.user_id }}/role" class="inline"><input type="hidden" name="csrf" value="{{ csrf }}">
+      <select name="role" onchange="this.form.submit()">{% for r in roles %}<option value="{{ r }}" {{ 'selected' if r == u.role }}>{{ ROLE_TITLES[r] }}</option>{% endfor %}</select>
+      <noscript><button>OK</button></noscript></form></td>
+  </tr>{% endfor %}
+</table></div>
+<section class="card narrow"><h2>Добавить по Telegram ID</h2>
+  <form method="post" action="/users/add" class="stack"><input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>Telegram ID <input name="user_id" inputmode="numeric" required></label>
+    <label>Роль <select name="role"><option value="user">Пользователь бота</option><option value="admin">Администратор</option></select></label>
+    <button>Добавить</button></form>
+  <p class="muted small">Свой ID человек узнает, написав боту любое сообщение.</p>
+</section>
+{% endblock %}

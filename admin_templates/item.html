@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block title %}{{ label }}{% endblock %}
+{% block content %}
+<p><a href="/items?house={{ item.house_id }}&kind={{ item.kind }}">← {{ HOUSES[item.house_id].name }} · {{ LEDGERS[item.kind].title }}</a></p>
+<h1>{{ label }}</h1>
+<p>{{ 'Владелец' if item.kind == 'residential' else 'Название' }} сейчас: <b>{{ name or '—' }}</b>
+  {% if item.template_name and item.template_name != name %}<span class="muted">(в шаблоне: {{ item.template_name }})</span>{% endif %}</p>
+<p><a href="/charts?house={{ item.house_id }}&kind={{ item.kind }}&item={{ item.id }}">📈 График потребления</a></p>
+<section class="card narrow">
+  <h2>{{ 'Смена владельца' if item.kind == 'residential' else 'Переименовать (смена юрлица)' }}</h2>
+  <form method="post" action="/items/{{ item.id }}/rename" class="stack">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>Новое {{ 'ФИО' if item.kind == 'residential' else 'название' }} <input name="new_name" required></label>
+    <label>Действует с месяца
+      <select name="effective_period">{% for p in periods %}<option value="{{ p }}" {{ 'selected' if p == period }}>{{ period_title(p) }}</option>{% endfor %}</select>
+    </label>
+    <button>Сохранить</button>
+    <p class="muted small">История показаний сохраняется. В Excel за прошлые месяцы останется старое название.</p>
+  </form>
+</section>
+{% if history %}
+<section class="card">
+  <h2>История названий</h2>
+  <div class="table-wrap"><table class="data small">
+    <thead><tr><th>С месяца</th><th>Было</th><th>Стало</th><th>Кто</th><th>Когда (UTC)</th></tr></thead>
+    {% for h in history %}<tr><td>{{ period_title(h.effective_period) }}</td><td>{{ h.old_name or '' }}</td><td><b>{{ h.new_name }}</b></td>
+      <td>{{ h.changed_by or '' }}</td><td>{{ h.changed_at.strftime('%d.%m.%Y %H:%M') }}</td></tr>{% endfor %}
+  </table></div>
+</section>
+{% endif %}
+{% endblock %}

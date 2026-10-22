@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% from "_filters.html" import filters %}
+{% block title %}Показания{% endblock %}
+{% block content %}
+<h1>Показания</h1>
+{{ filters('/readings', house, kind, period, periods, kinds) }}
+<p class="muted">{{ HOUSES[house].name }} · {{ LEDGERS[kind].title }} · {{ period_title(period) }} — внесено {{ filled }} из {{ rows | length }}.
+  <a href="/download?{{ query }}">⬇ Скачать Excel</a></p>
+<div class="table-wrap">
+<table class="data">
+  <thead><tr><th>{{ '№ кв.' if kind == 'residential' else 'Абонент' }}</th>
+    {% if kind == 'residential' %}<th class="hide-sm">Владелец</th>{% endif %}
+    <th class="num">Прошлый</th><th class="num">Текущий</th><th class="num">Расход</th><th class="hide-sm">Изменено</th><th></th></tr></thead>
+  <tbody>
+  {% for r in rows %}
+  <tr class="{{ 'neg' if r.negative }} {{ 'off' if r.item.disabled }}">
+    <td><a href="/items/{{ r.item.id }}">{{ r.label }}</a>{% if r.item.disabled %} <span class="badge">откл.</span>{% endif %}</td>
+    {% if kind == 'residential' %}<td class="hide-sm">{{ r.owner or '' }}</td>{% endif %}
+    <td class="num">{{ fmt(r.prev.value) if r.prev }}</td>
+    <td class="num">
+      <form method="post" action="/readings/save" class="cell-form">
+        <input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="apartment_id" value="{{ r.item.id }}">
+        <input type="hidden" name="period" value="{{ period }}"><input type="hidden" name="ret" value="/readings?{{ query }}">
+        <input name="value" inputmode="decimal" value="{{ fmt(r.cur.value) if r.cur }}" aria-label="Показание" size="8">
+        <button title="Сохранить">✓</button>
+      </form>
+    </td>
+    <td class="num">{% if r.cons is not none %}<b>{{ fmt(r.cons) }}</b>{% endif %}</td>
+    <td class="hide-sm small muted">{% if r.cur %}{{ SOURCE_TITLES.get(r.cur.source, r.cur.source) }} · {{ r.cur.changed_by or '' }}<br>{{ r.cur.updated_at.strftime('%d.%m %H:%M') if r.cur.updated_at }}{% endif %}</td>
+    <td>{% if r.cur %}
+      <form method="post" action="/readings/delete" onsubmit="return confirm('Удалить показание?')">
+        <input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="apartment_id" value="{{ r.item.id }}">
+        <input type="hidden" name="period" value="{{ period }}"><input type="hidden" name="ret" value="/readings?{{ query }}">
+        <button class="link danger" title="Удалить">✕</button>
+      </form>{% endif %}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% if audit %}
+<section class="card">
+  <h2>Журнал изменений за месяц</h2>
+  <div class="table-wrap"><table class="data small">
+    <thead><tr><th>Когда (UTC)</th><th>Строка</th><th>Действие</th><th class="num">Было</th><th class="num">Стало</th><th>Кто</th></tr></thead>
+    {% for a in audit %}<tr><td>{{ a.at.strftime('%d.%m.%Y %H:%M') }}</td><td>{{ labels.get(a.apartment_id, a.apartment_id) }}</td>
+      <td>{{ {'create':'создано','update':'изменено','delete':'удалено'}[a.action] }}</td><td class="num">{{ fmt(a.old_value) }}</td>
+      <td class="num">{{ fmt(a.new_value) }}</td><td>{{ SOURCE_TITLES.get(a.source, a.source) }} · {{ a.actor or '' }}</td></tr>{% endfor %}
+  </table></div>
+</section>
+{% endif %}
+{% endblock %}
