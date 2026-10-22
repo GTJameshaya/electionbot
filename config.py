@@ -14,6 +14,8 @@ from pathlib import Path
 
 from dotenv import dotenv_values, load_dotenv
 
+from crm_ingest import CrmConfig, load_crm_config
+
 logger = logging.getLogger(__name__)
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -110,6 +112,7 @@ class Settings:
     allowed_user_ids: frozenset[int] = field(default_factory=frozenset)   # роль user (только бот)
     admin_user_ids: frozenset[int] = field(default_factory=frozenset)     # роль admin (бот + админ-панель)
     admin_public_url: str = ""                                            # https://… адрес админ-панели
+    crm: CrmConfig = field(default_factory=CrmConfig)                     # CRM_INGEST_URL / CRM_INGEST_TOKEN
 
 
 def resolve_database_url(url: str | None, base_dir: Path = BASE_DIR) -> str:
@@ -176,6 +179,7 @@ def load_settings(require_telegram: bool = True) -> Settings:
         allowed_user_ids=allowed,
         admin_user_ids=admins,
         admin_public_url=(os.getenv("ADMIN_PUBLIC_URL") or "").strip().rstrip("/"),
+        crm=load_crm_config(),
     )
 
 
@@ -189,6 +193,10 @@ class AdminSettings:
     bot_username: str = ""          # для Telegram Login Widget (необязательно)
     session_hours: int = 12
     database_url: str = DEFAULT_DATABASE_URL
+    # Для «Отправить в чат»: куда и с каким тегом (как у бота). 0 — отправка из админки выключена.
+    group_chat_id: int = 0
+    target_bot_tag: str = "@supp0rt_dom"
+    crm: CrmConfig = field(default_factory=CrmConfig)
 
     @property
     def https(self) -> bool:
@@ -212,6 +220,13 @@ def load_admin_settings() -> AdminSettings:
     except ValueError:
         errors.append("ADMIN_PORT должен быть числом")
         port = 8080
+    group_chat_id = 0
+    raw_chat = (os.getenv("GROUP_CHAT_ID") or "").strip()
+    if raw_chat:
+        try:
+            group_chat_id = int(raw_chat)
+        except ValueError:
+            errors.append(f"GROUP_CHAT_ID должен быть целым числом, получено '{raw_chat}'")
     if errors:
         raise ConfigError("; ".join(errors))
     return AdminSettings(
@@ -220,4 +235,7 @@ def load_admin_settings() -> AdminSettings:
         public_url=(os.getenv("ADMIN_PUBLIC_URL") or "").strip().rstrip("/"),
         bot_username=(os.getenv("ADMIN_BOT_USERNAME") or "").strip().lstrip("@"),
         database_url=resolve_database_url(os.getenv("DATABASE_URL")),
+        group_chat_id=group_chat_id,
+        target_bot_tag=(os.getenv("TARGET_BOT_TAG") or "@supp0rt_dom").strip(),
+        crm=load_crm_config(),
     )

@@ -1,0 +1,83 @@
+{% extends "base.html" %}
+{% block title %}Отправить в чат{% endblock %}
+{% block content %}
+<h1>Отправить ведомость в чат</h1>
+<section class="card">
+  <p>Файл собирается из базы так же, как при обычной отправке из бота, и уходит в рабочую группу с той же подписью.
+    Перед отправкой будет шаг подтверждения.</p>
+  <ul class="small">
+    <li><b>Просто сообщение</b> — подпись без тега бота, тикет в CRM не создаётся.</li>
+    <li><b>С тикетом</b> — подпись с тегом, и в CRM создаётся тикет (или дописывается в уже созданный по этой ведомости).</li>
+  </ul>
+  {% if not chat_ok %}<p class="flash error">GROUP_CHAT_ID не задан в .env — отправлять некуда, кнопки выключены.</p>{% endif %}
+  {% if not crm_ok %}<p class="flash warn">Режим «С тикетом» выключен: в .env не заданы CRM_INGEST_URL и CRM_INGEST_TOKEN.
+    «Просто сообщение» работает.</p>{% endif %}
+</section>
+
+{% for t in targets %}
+<section class="card">
+  <h2>{{ HOUSES[t.house].name }} · {{ LEDGERS[t.kind].title }}</h2>
+  <div class="table-wrap"><table class="data resend">
+    <thead><tr><th>Месяц</th><th class="num">Показаний</th><th class="hide-sm">Статус</th><th class="hide-sm">Тикет</th><th></th></tr></thead>
+    {% for r in t.rows %}
+    <tr>
+      <td>{{ period_title(r.period) }}</td>
+      <td class="num">{{ r.count }}</td>
+      <td class="hide-sm">{% if r.submitted %}<span class="badge ok">отправлялась</span>{% else %}<span class="badge">не отправлялась</span>{% endif %}</td>
+      <td class="hide-sm small">{% if r.ticket %}#{{ r.ticket.ticket_number }} <span class="muted">{{ r.ticket.updated_at.strftime('%d.%m %H:%M') }}</span>{% else %}—{% endif %}</td>
+      <td class="act">
+        <form method="post" action="/resend/confirm" class="cell-form resend-form" data-once>
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <input type="hidden" name="house" value="{{ t.house }}"><input type="hidden" name="kind" value="{{ t.kind }}">
+          <input type="hidden" name="period" value="{{ r.period }}">
+          <select name="mode" aria-label="Режим">
+            <option value="plain">Просто сообщение</option>
+            <option value="ticket" {{ 'disabled' if not crm_ok }}>С тикетом{{ ' (CRM не настроена)' if not crm_ok }}</option>
+          </select>
+          {% if r.ticket and crm_ok %}
+          <select name="ticket" aria-label="Тикет">
+            <option value="append" selected>Дописать в тикет #{{ r.ticket.ticket_number }}</option>
+            <option value="new">Новый тикет</option>
+          </select>
+          {% endif %}
+          <button {{ 'disabled' if not chat_ok }}>Отправить в чат</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+  </table></div>
+</section>
+{% endfor %}
+
+<h2>Журнал отправок из админки</h2>
+<div class="table-wrap"><table class="data">
+  <thead><tr><th>Когда (UTC)</th><th>Кто</th><th>Дом</th><th>Ведомость</th><th>Месяц</th><th>Режим</th><th>Telegram</th><th>CRM</th></tr></thead>
+  {% for e in log %}<tr class="{{ 'neg' if e.status == 'failed' or e.crm_status == 'error' }}">
+    <td class="nowrap">{{ e.created_at.strftime('%d.%m.%Y %H:%M') }}</td>
+    <td>{{ e.requested_name or e.requested_by }} <span class="muted small">{{ e.requested_by }}</span></td>
+    <td>{{ HOUSES[e.house_id].name if e.house_id in HOUSES else e.house_id }}</td>
+    <td>{{ LEDGERS[e.kind].title if e.kind in LEDGERS else e.kind }}</td>
+    <td>{{ period_title(e.period) }}</td>
+    <td>{{ MODE_TITLES.get(e.mode, e.mode) }}{% if e.reply_to_ticket %}<br><span class="small muted">в тикет #{{ e.reply_to_ticket }}</span>{% endif %}</td>
+    <td>{% if e.status == 'sent' %}<span class="badge ok">отправлено</span> <span class="small muted">msg {{ e.message_id }}</span>
+        {% elif e.status == 'failed' %}<span class="badge err">ошибка</span><br><span class="small danger">{{ e.error }}</span>
+        {% elif e.status == 'unknown' %}<span class="badge warn">неизвестно</span><br><span class="small">{{ e.error }}</span>
+        {% else %}<span class="badge warn">{{ RESEND_STATUS.get(e.status, e.status) }}</span>{% endif %}</td>
+    <td class="small">{% if e.mode != 'ticket' %}<span class="muted">не нужно</span>
+        {% elif e.crm_status == 'ok' %}<span class="badge ok">#{{ e.crm_ticket_number }} {{ 'создан' if e.crm_created else 'дополнен' }}</span><br>{{ e.crm_message }}
+        {% elif e.crm_status == 'error' %}<span class="danger">{{ e.crm_message }}</span>
+        {% else %}<span class="muted">—</span>{% endif %}</td>
+  </tr>{% else %}<tr><td colspan="8" class="muted">Из админки пока ничего не отправляли</td></tr>{% endfor %}
+</table></div>
+{% endblock %}
+{% block scripts %}
+<script>
+// Выбор «Новый / Дописать в тикет» нужен только в режиме «С тикетом».
+document.querySelectorAll('select[name=mode]').forEach(function (m) {
+  var t = m.form.querySelector('select[name=ticket]');
+  if (!t) return;
+  var sync = function () { t.hidden = m.value !== 'ticket'; };
+  m.addEventListener('change', sync); sync();
+});
+</script>
+{% endblock %}

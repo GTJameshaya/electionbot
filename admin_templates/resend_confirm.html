@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block title %}Подтверждение отправки{% endblock %}
+{% block content %}
+<h1>Отправить в чат?</h1>
+<section class="card narrow">
+  <table class="data">
+    <tr><th>Дом</th><td>{{ HOUSES[house].name }}</td></tr>
+    <tr><th>Месяц</th><td>{{ period_title(period) }}</td></tr>
+    <tr><th>Ведомость</th><td>{{ LEDGERS[kind].title }}</td></tr>
+    <tr><th>Режим</th><td>{{ MODE_TITLES[mode] }}{% if mode == 'ticket' %} —
+      {% if reply_to %}дописать в тикет #{{ reply_to }}{% else %}новый тикет{% if existing %} <span class="muted small">(прошлый: #{{ existing.ticket_number }})</span>{% endif %}{% endif %}{% endif %}</td></tr>
+    <tr><th>Показаний</th><td>{{ count }}</td></tr>
+    <tr><th>Чат</th><td>{{ chat_id }}</td></tr>
+    <tr><th>Подпись</th><td><pre class="small caption">{{ caption }}</pre></td></tr>
+  </table>
+  <form method="post" action="/resend/send" class="row-form" data-once>
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="token" value="{{ token }}">
+    <a href="/resend">Отмена</a>
+    <button data-busy="Отправляю…">Да, отправить</button>
+  </form>
+  <p class="muted small">Подтверждение одноразовое и действует 15 минут: повторное нажатие файл второй раз не отправит.</p>
+</section>
+{% endblock %}

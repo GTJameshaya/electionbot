@@ -14,7 +14,7 @@
   <nav>
     {% set nav_items = [('index','/','Главная'),('readings','/readings','Показания'),('missing','/missing','Кто не сдал'),
                     ('items','/items','Квартиры и абоненты'),('aliases','/aliases','Псевдонимы'),('users','/users','Пользователи'),
-                    ('submissions','/submissions','Отправки'),('charts','/charts','Графики')] %}
+                    ('submissions','/submissions','Отправки'),('resend','/resend','Отправить в чат'),('charts','/charts','Графики')] %}
     {% for key, url, title in nav_items %}<a href="{{ url }}" class="{{ 'active' if nav == key }}">{{ title }}</a>{% endfor %}
     <form method="post" action="/logout" class="inline">
       <input type="hidden" name="csrf" value="{{ csrf }}">
@@ -27,6 +27,25 @@
 {% if flash %}<div class="flash {{ flash[0] }}">{{ flash[1] }}</div>{% endif %}
 {% block content %}{% endblock %}
 </main>
+<script>
+// Защита от двойного клика: форма с data-once отправляется один раз, кнопки после нажатия гаснут.
+document.querySelectorAll('form[data-once]').forEach(function (f) {
+  f.addEventListener('submit', function (e) {
+    if (f.dataset.sent) { e.preventDefault(); return; }
+    f.dataset.sent = '1';
+    f.querySelectorAll('button').forEach(function (b) { b.dataset.label = b.textContent; b.disabled = true; b.textContent = b.dataset.busy || 'Подождите…'; });
+  });
+});
+// «Назад» в браузере возвращает страницу из кеша с погашенными кнопками — включаем их обратно
+// (повтор той же отправки всё равно отсечёт сервер: подтверждение одноразовое).
+window.addEventListener('pageshow', function (e) {
+  if (!e.persisted) return;
+  document.querySelectorAll('form[data-once]').forEach(function (f) {
+    delete f.dataset.sent;
+    f.querySelectorAll('button').forEach(function (b) { b.disabled = false; if (b.dataset.label) b.textContent = b.dataset.label; });
+  });
+});
+</script>
 {% block scripts %}{% endblock %}
 </body>
 </html>

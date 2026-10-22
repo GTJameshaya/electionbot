@@ -5,10 +5,14 @@ SQLAlchemy>=2.0.30,<2.1
 # Для PostgreSQL (DATABASE_URL=postgresql+psycopg://...) раскомментируйте:
 # psycopg[binary]>=3.1
 # Админ-панель (python admin.py)
-fastapi>=0.110,<1
+# fastapi и starlette закреплены на проверенных версиях (на них проходят тесты)
+fastapi==0.159.1
+starlette==1.9.0
 uvicorn>=0.29
 jinja2>=3.1
 itsdangerous>=2.1
 python-multipart>=0.0.9
-# Для тестов админки (TestClient); версия совместима с python-telegram-bot 20.6
-httpx~=0.25.2
+# HTTP-клиент: им ходят python-telegram-bot 20.6 (нужен именно 0.25.x) и связь с CRM (crm_ingest.py)
+httpx==0.25.2
+# Только для тестов: starlette.testclient работает на httpx2 (отдельный пакет, с httpx 0.25 не конфликтует)
+httpx2==2.16.0

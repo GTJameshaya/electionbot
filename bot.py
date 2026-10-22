@@ -7,29 +7,22 @@ import io
 import logging
 import signal
 import sys
-from datetime import datetime
 
 from telegram import (InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup,
                       Update, WebAppInfo)
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
 from apartments import apartment_label, format_suggestions, input_example, plural_ru, suggest_apartments
-from config import DEFAULT_ALIASES, HOUSES, ConfigError, Settings, load_settings
-from db import ROLE_ADMIN, ROLE_USER, Database, current_period, parse_period, previous_period
-from excel_report import MONTHS_RU
+from captions import HOUSE_NAMES, archive_file_name, build_caption, ledger_suffix, period_label, period_title
+from config import DEFAULT_ALIASES, ConfigError, Settings, load_settings
+from crm_ingest import describe_config, push_ledger_ticket
+from db import ROLE_ADMIN, ROLE_USER, Database, current_period, previous_period
 from ledgers import COMMERCE, LEDGERS, RESIDENTIAL, STOP_WORDS, CommerceMatcher
+from logging_setup import add_secret, setup_logging
 from parsing import fmt_value, parse_readings, parse_value
 
-# Логи в простом текстовом формате (удобно читать на хостинге); болтливый httpx приглушаем.
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
-logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
-HOUSE_NAMES = {house_id: info["name"] for house_id, info in HOUSES.items()}
-HOUSE_HASHTAG = {house_id: info["hashtag"] for house_id, info in HOUSES.items()}
 HOUSE_BY_NAME = {name: house_id for house_id, name in HOUSE_NAMES.items()}
 
 BTN_NEW = "Начать новую сессию"
@@ -115,39 +108,6 @@ def saved_summary(new: int, updated: int, kind: str = RESIDENTIAL) -> str | None
         return None
     text = ", ".join(parts)
     return "✅ " + text[0].upper() + text[1:]
-
-
-def period_label(period: str) -> str:
-    year, month = parse_period(period)
-    return f"{month:02d}.{year}"
-
-
-def period_title(period: str) -> str:
-    year, month = parse_period(period)
-    return f"{MONTHS_RU[month - 1]} {year}"
-
-
-def month_tag(period: str) -> str:
-    year, month = parse_period(period)
-    return f"{MONTHS_RU[month - 1]}_{year}"
-
-
-def ledger_suffix(kind: str) -> str:
-    return "" if kind == RESIDENTIAL else f" — {LEDGERS[kind].title}"
-
-
-def archive_file_name(house_id: int, when: datetime | None = None, kind: str = RESIDENTIAL) -> str:
-    when = when or datetime.now()
-    return (f"{when.strftime('%Y%m%d_%H%M%S')}_house{house_id}_{LEDGERS[kind].file_tag}"
-            f"{HOUSE_NAMES[house_id].replace(' ', '_')}.xlsx")
-
-
-def build_caption(tag: str, house_id: int, period: str, kind: str = RESIDENTIAL) -> str:
-    tags = f"#{month_tag(period)} {HOUSE_HASHTAG[house_id]}"
-    if LEDGERS[kind].hashtag:
-        tags += f" {LEDGERS[kind].hashtag}"
-    return (f"{tag} Привет! Показания за текущий {period_label(period)} — {HOUSE_NAMES[house_id]}"
-            f"{ledger_suffix(kind)}\n{tags}")
 
 
 # ---------------------------------------------------------------- клавиатуры
@@ -333,24 +293,72 @@ async def send_current_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def _send_ledger(context, settings, db, house_id, period, kind, user_id) -> tuple[bool, str | None]:
     """Шлёт ведомость в группу. Возвращает (отправлено?, текст ошибки записи в БД или None).
-    Если не отправилось — пишем неудачную попытку в журнал и пробрасываем ошибку дальше."""
+    Если не отправилось — пишем неудачную попытку в журнал и пробрасываем ошибку дальше.
+    После удачной отправки (если настроена CRM) создаём тикет или дописываем в уже существующий."""
     file_name = archive_file_name(house_id, kind=kind)
+    caption = build_caption(settings.target_bot_tag, house_id, period, kind)
     try:
         data = db.build_excel(house_id, period, kind)
         with io.BytesIO(data) as buf:
-            await context.bot.send_document(
-                settings.group_chat_id, buf, filename=file_name,
-                caption=build_caption(settings.target_bot_tag, house_id, period, kind),
+            sent = await context.bot.send_document(
+                settings.group_chat_id, buf, filename=file_name, caption=caption,
             )
     except Exception as e:
         db.mark_failed(house_id, period, user_id, file_name, str(e), kind=kind)
         raise
+    db_error = None
     try:
         db.mark_submitted(house_id, period, user_id, file_name, kind=kind)
     except Exception as e:
         logger.exception("Файл отправлен, но не удалось записать факт отправки в БД")
-        return True, str(e)
-    return True, None
+        db_error = str(e)
+    if settings.crm.enabled:
+        # CRM — в фоне: человек сразу получает ответ, а медленная CRM ничего не задерживает.
+        spawn_background(_push_to_crm(context, settings, db, house_id, period, kind, user_id, caption, sent,
+                                      file_name, data), f"CRM: дом {house_id}, {period}, {kind}")
+    return True, db_error
+
+
+# Фоновые задачи держим в множестве: asyncio хранит на задачи только слабые ссылки,
+# и без этого задачу может собрать сборщик мусора посреди работы.
+_background: set[asyncio.Task] = set()
+
+
+def spawn_background(coro, name: str) -> asyncio.Task:
+    task = asyncio.create_task(coro, name=name)
+    _background.add(task)
+    task.add_done_callback(_background_done)
+    return task
+
+
+def _background_done(task: asyncio.Task) -> None:
+    _background.discard(task)
+    if task.cancelled():
+        logger.warning("Фоновая задача отменена: %s", task.get_name())
+    elif task.exception() is not None:
+        logger.error("Фоновая задача упала: %s", task.get_name(), exc_info=task.exception())
+
+
+async def wait_background(timeout: float | None = None) -> None:
+    """Дождаться фоновых задач (при остановке бота и в тестах)."""
+    if _background:
+        await asyncio.wait(list(_background), timeout=timeout)
+
+
+async def _push_to_crm(context, settings, db, house_id, period, kind, user_id, caption, sent,
+                       file_name, data) -> None:
+    """Тикет в CRM по только что отправленному файлу (запускается фоном). Если по этой ведомости
+    тикет уже был — дописываем в него. Любые ошибки CRM только в лог: отправка уже состоялась."""
+    try:
+        existing = db.get_crm_ticket(house_id, period, kind)
+        username = getattr(context.bot, "username", None)
+        await push_ledger_ticket(
+            settings.crm, db, house_id=house_id, house_name=HOUSE_NAMES[house_id], period=period, kind=kind,
+            source="bot", user_id=user_id, author=f"@{username}" if isinstance(username, str) else "bot",
+            text=caption, chat_id=settings.group_chat_id, message_id=getattr(sent, "message_id", None),
+            file_name=file_name, data=data, reply_to_ticket=existing.ticket_number if existing else None)
+    except Exception:  # noqa: BLE001
+        logger.exception("CRM: не удалось создать тикет")
 
 
 async def finish_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -741,11 +749,14 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     """Точка входа: читаем настройки, готовим БД и запускаем бота."""
+    setup_logging()
     try:
         settings = load_settings()
     except ConfigError as e:
         logger.critical("Ошибка конфигурации: %s. Проверь .env (см. .env.example)", e)
         sys.exit(1)
+    add_secret(settings.bot_token)
+    add_secret(settings.crm.token)
 
     db = Database(settings.database_url)
     db.init()
@@ -757,6 +768,7 @@ def main():
     else:
         logger.info("Администраторов: %d, всего с доступом: %d", db.count_admins(), db.count_active_users())
     logger.info("База данных: %s", db.engine.url.render_as_string(hide_password=True))
+    logger.info(describe_config(settings.crm))
 
     app = Application.builder().token(settings.bot_token).build()
     app.bot_data["db"] = db
@@ -797,6 +809,9 @@ async def run_until_signal(app: Application, stop_signals=(signal.SIGINT, signal
             logger.info("🚀 Бот запущен!")
             await stop.wait()
             logger.info("Получен сигнал остановки, завершаю работу…")
+            if _background:
+                logger.info("Жду фоновые задачи (CRM): %d", len(_background))
+                await wait_background(timeout=30)
         finally:
             # Шаги по отдельности: если Telegram при выходе не ответил, остальные всё равно
             # выполнятся и код выхода будет 0. Без app.stop() PTB зависает на выходе.

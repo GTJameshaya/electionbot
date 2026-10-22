@@ -21,9 +21,12 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from admin_auth import AuthError, validate_login_widget, validate_webapp_init_data
 from apartments import apartment_label
+from captions import archive_file_name, build_caption
 from config import BASE_DIR, HOUSES, AdminSettings, ConfigError, load_admin_settings, load_settings
+from crm_ingest import describe_config, push_ledger_ticket
+from logging_setup import add_secret, setup_logging
 from db import (ROLE_ADMIN, ROLE_NONE, ROLE_USER, ROLES, Database, LastAdminError, current_period,
-                parse_period, previous_period)
+                parse_period, previous_period, utcnow)
 from excel_report import MONTHS_RU
 from ledgers import COMMERCE, LEDGERS, RESIDENTIAL
 
@@ -32,6 +35,36 @@ logger = logging.getLogger("admin")
 ROLE_TITLES = {ROLE_ADMIN: "Администратор", ROLE_USER: "Пользователь бота", ROLE_NONE: "Нет доступа"}
 SOURCE_TITLES = {"bot": "бот", "admin": "админка", "archive": "архив", "template": "шаблон"}
 STATUS_TITLES = {"sent": "отправлено", "failed": "ошибка"}
+MODE_PLAIN, MODE_TICKET = "plain", "ticket"
+MODE_TITLES = {MODE_PLAIN: "Просто сообщение", MODE_TICKET: "С тикетом"}
+RESEND_STATUS = {"sending": "отправляется…", "sent": "отправлено", "failed": "ошибка",
+                 "unknown": "неизвестно"}
+STALE_RESEND_MINUTES = 10
+UNKNOWN_DELIVERY = "Telegram не ответил вовремя — файл мог дойти, проверьте чат"
+
+
+def is_timeout(exc: BaseException) -> bool:
+    """Таймаут при отправке: запрос мог дойти до Telegram, поэтому это не «ошибка», а «неизвестно»."""
+    import asyncio
+
+    import httpx
+    from telegram.error import TimedOut
+    return isinstance(exc, (TimedOut, httpx.TimeoutException, asyncio.TimeoutError, TimeoutError))
+
+
+class TelegramSender:
+    """Отправка файла в группу из процесса админки через Bot API (python-telegram-bot).
+    В тестах подменяется объектом с тем же методом send_document."""
+
+    def __init__(self, token: str):
+        self.token = token
+
+    async def send_document(self, chat_id: int, data: bytes, filename: str, caption: str) -> int:
+        """Возвращает message_id отправленного сообщения; при ошибке — исключение."""
+        from telegram import Bot
+        async with Bot(self.token) as bot:
+            msg = await bot.send_document(chat_id, document=data, filename=filename, caption=caption)
+        return msg.message_id
 
 
 # ======================================================================== помощники
@@ -110,15 +143,18 @@ class HeadAsGetMiddleware:
 
 
 # ======================================================================== приложение
-def create_app(db: Database, settings: AdminSettings) -> FastAPI:
-    """Собирает приложение со всеми страницами. Маршруты — вложенные функции, им доступны db и settings."""
+def create_app(db: Database, settings: AdminSettings, sender=None) -> FastAPI:
+    """Собирает приложение со всеми страницами. Маршруты — вложенные функции, им доступны db и settings.
+    sender — чем слать файлы в группу (по умолчанию TelegramSender; в тестах — подделка)."""
+    sender = sender or TelegramSender(settings.bot_token)
     app = FastAPI(title="Админ-панель", docs_url=None, redoc_url=None, openapi_url=None)
     app.add_middleware(SessionMiddleware, secret_key=settings.secret_key, session_cookie="eb_admin",
                        max_age=settings.session_hours * 3600, same_site="lax", https_only=settings.https)
     templates = Jinja2Templates(directory=str(BASE_DIR / "admin_templates"))
     templates.env.globals.update(fmt=fmt, period_title=period_title, HOUSES=HOUSES, LEDGERS=LEDGERS,
                                  ROLE_TITLES=ROLE_TITLES, SOURCE_TITLES=SOURCE_TITLES,
-                                 STATUS_TITLES=STATUS_TITLES)
+                                 STATUS_TITLES=STATUS_TITLES, MODE_TITLES=MODE_TITLES,
+                                 RESEND_STATUS=RESEND_STATUS)
     app.mount("/static", StaticFiles(directory=str(BASE_DIR / "admin_static")), name="static")
     app.state.db, app.state.settings = db, settings
 
@@ -489,6 +525,118 @@ def create_app(db: Database, settings: AdminSettings) -> FastAPI:
                         headers={"Content-Disposition": f"attachment; filename=\"house{house}_{period}.xlsx\"; "
                                                         f"filename*=UTF-8''{quote(name)}"})
 
+    # ------------------------------------------------------------ отправить в чат
+    def resend_targets() -> list[dict]:
+        """Что можно отправить: по каждому дому и ведомости — текущий месяц и все месяцы с показаниями."""
+        out = []
+        for house in HOUSES:
+            for kind in ledgers_for(db, house):
+                counts = db.periods_with_readings(house, kind)
+                periods = sorted(set(counts) | {current_period()}, reverse=True)
+                rows = []
+                for p in periods:
+                    t = db.get_crm_ticket(house, p, kind)
+                    rows.append(dict(period=p, count=counts.get(p, 0), ticket=t,
+                                     submitted=db.is_submitted(house, p, kind)))
+                out.append(dict(house=house, kind=kind, rows=rows))
+        return out
+
+    def resend_allowed(house: int, kind: str, period: str) -> bool:
+        if house not in HOUSES or kind not in LEDGERS or not db.has_ledger(house, kind):
+            return False
+        return period == current_period() or period in db.periods_with_readings(house, kind)
+
+    def resend_ctx() -> dict:
+        return dict(chat_ok=bool(settings.group_chat_id), crm_ok=settings.crm.enabled)
+
+    @app.get("/resend", response_class=HTMLResponse)
+    async def resend_page(request: Request):
+        if (g := guard(request)) is not None:
+            return g
+        users_by_id = {u.user_id: u for u in db.list_users()}
+        db.expire_stale_resends(STALE_RESEND_MINUTES)
+        return render(request, "resend.html", nav="resend", targets=resend_targets(), log=db.list_resends(),
+                      users=users_by_id, **resend_ctx())
+
+    @app.post("/resend/confirm", response_class=HTMLResponse)
+    async def resend_confirm(request: Request, csrf: str = Form(""), house: int = Form(...),
+                             kind: str = Form(...), period: str = Form(...), mode: str = Form(MODE_PLAIN),
+                             ticket: str = Form("new")):
+        """Шаг подтверждения: показываем, что именно уйдёт, и выдаём одноразовый токен."""
+        if (g := await form_guard(request, csrf)) is not None:
+            return g
+        if not settings.group_chat_id:
+            flash(request, "GROUP_CHAT_ID не задан — отправлять некуда", "error")
+            return redirect("/resend")
+        if mode not in MODE_TITLES or not resend_allowed(house, kind, period):
+            flash(request, "Нельзя отправить: неизвестный дом, ведомость, месяц или режим", "error")
+            return redirect("/resend")
+        if mode == MODE_TICKET and not settings.crm.enabled:
+            flash(request, "Режим «С тикетом» выключен: не заданы CRM_INGEST_URL / CRM_INGEST_TOKEN", "error")
+            return redirect("/resend")
+        existing = db.get_crm_ticket(house, period, kind) if mode == MODE_TICKET else None
+        reply_to = existing.ticket_number if existing and ticket != "new" else None
+        uid = current_admin(request)
+        user = db.get_user(uid)
+        token = db.create_resend(uid, user.display if user else str(uid), house, period, kind, mode, reply_to)
+        tag = settings.target_bot_tag if mode == MODE_TICKET else ""
+        return render(request, "resend_confirm.html", nav="resend", token=token, house=house, kind=kind,
+                      period=period, mode=mode, reply_to=reply_to, existing=existing,
+                      caption=build_caption(tag, house, period, kind),
+                      count=db.count_readings(house, period, kind), chat_id=settings.group_chat_id)
+
+    @app.post("/resend/send")
+    async def resend_send(request: Request, csrf: str = Form(""), token: str = Form("")):
+        """Отправка. Токен гасится атомарно, так что повторный POST ничего не отправит."""
+        if (g := await form_guard(request, csrf)) is not None:
+            return g
+        uid = current_admin(request)
+        row = db.claim_resend(token, uid)
+        if row is None:
+            flash(request, "Эта отправка уже выполнена или подтверждение устарело — файл повторно не отправлен",
+                  "warn")
+            return redirect("/resend")
+        house, kind, period = row.house_id, row.kind, row.period
+        ticket_mode = row.mode == MODE_TICKET
+        caption = build_caption(settings.target_bot_tag if ticket_mode else "", house, period, kind)
+        file_name = archive_file_name(house, kind=kind)
+        try:
+            data = db.build_excel(house, period, kind)
+            message_id = await sender.send_document(settings.group_chat_id, data, file_name, caption)
+        except Exception as e:  # noqa: BLE001
+            if is_timeout(e):
+                # Файл мог дойти: не «ошибка», а «неизвестно», и CRM не трогаем (нет message_id).
+                logger.warning("Отправка в чат из админки: таймаут (%s) — файл мог дойти", e)
+                db.finish_resend(row.id, status="unknown", error=UNKNOWN_DELIVERY, chat_id=settings.group_chat_id,
+                                 file_name=file_name)
+                flash(request, f"⚠️ {UNKNOWN_DELIVERY}. Если файла нет — отправьте ещё раз.", "warn")
+                return redirect("/resend")
+            logger.exception("Отправка в чат из админки не удалась")
+            db.finish_resend(row.id, status="failed", error=str(e)[:2000], chat_id=settings.group_chat_id,
+                             file_name=file_name)
+            flash(request, f"Не удалось отправить: {e}", "error")
+            return redirect("/resend")
+        db.finish_resend(row.id, status="sent", sent_at=utcnow(), chat_id=settings.group_chat_id,
+                         message_id=message_id, file_name=file_name)
+        try:
+            db.mark_submitted(house, period, uid, file_name, source="admin", kind=kind)
+        except Exception:  # noqa: BLE001
+            logger.exception("Файл отправлен, но запись в журнал отправок не удалась")
+        text = f"Отправлено в чат: {HOUSES[house]['name']}, {LEDGERS[kind].title}, {period_title(period)}"
+        level = "ok"
+        if ticket_mode:
+            res = await push_ledger_ticket(
+                settings.crm, db, house_id=house, house_name=HOUSES[house]["name"], period=period, kind=kind,
+                source="admin_resend", user_id=uid, author=row.requested_name or str(uid), text=caption,
+                chat_id=settings.group_chat_id, message_id=message_id, file_name=file_name, data=data,
+                reply_to_ticket=row.reply_to_ticket)
+            db.finish_resend(row.id, crm_status="ok" if res.ok else "error", crm_ticket_number=res.ticket_number,
+                             crm_created=res.created, crm_message=res.summary()[:2000])
+            text += f". CRM: {res.summary()}"
+            level = "ok" if res.ok and not res.warnings else "warn"
+        flash(request, text, level)
+        return redirect("/resend")
+
     # ------------------------------------------------------------ кто не сдал
     def missing_report(period: str) -> list[dict]:
         """Сводка «Кто не сдал» за месяц по всем домам и ведомостям."""
@@ -565,16 +713,23 @@ def create_app(db: Database, settings: AdminSettings) -> FastAPI:
 # ======================================================================== запуск
 def main(argv=None) -> int:
     """Точка входа: настройки, БД, роли из .env — и запускаем uvicorn."""
-    logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
+    setup_logging()
     try:
         settings = load_admin_settings()
         bot_settings = load_settings(require_telegram=False)
     except ConfigError as e:
         logger.critical("Ошибка конфигурации админки: %s. См. .env.example", e)
         return 1
+    add_secret(settings.bot_token)
+    add_secret(settings.crm.token)
     db = Database(settings.database_url)
     db.init()
     db.seed_roles(bot_settings.admin_user_ids, bot_settings.allowed_user_ids)
+    logger.info(describe_config(settings.crm))
+    if n := db.expire_stale_resends(STALE_RESEND_MINUTES):
+        logger.warning("Отправки в чат, прерванные на полпути (статус «неизвестно»): %d", n)
+    if not settings.group_chat_id:
+        logger.warning("GROUP_CHAT_ID не задан — «Отправить в чат» в админке выключено")
     if db.count_admins() == 0:
         logger.error("Нет ни одного администратора — войти в панель не сможет никто. "
                      "Укажите ADMIN_USER_IDS в .env и перезапустите.")
@@ -582,8 +737,9 @@ def main(argv=None) -> int:
         logger.warning("ADMIN_PUBLIC_URL не https — Mini App в Telegram работать не будет, cookie без флага "
                        "Secure. Для доступа из интернета поставьте панель за nginx + HTTPS (см. README).")
     import uvicorn
+    # log_config=None: uvicorn не ставит свои обработчики, его логи идут через наши (с фильтром секретов)
     uvicorn.run(create_app(db, settings), host=settings.host, port=settings.port,
-                proxy_headers=True, forwarded_allow_ips="127.0.0.1", log_level="info")
+                proxy_headers=True, forwarded_allow_ips="127.0.0.1", log_level="info", log_config=None)
     return 0
 
 

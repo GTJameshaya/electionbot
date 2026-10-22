@@ -43,3 +43,7 @@ tr.neg td{background:#fef2f2}tr.neg td b{color:var(--err)}tr.off td{color:#9ca3a
   #menu:checked~nav{display:flex}.hide-sm{display:none}main{padding:.7rem}.cell-form input{width:5.5rem}
 }
 table.data td:first-child{white-space:nowrap}
+pre.caption{white-space:pre-wrap;margin:0;font:inherit}
+.resend-form{flex-wrap:wrap}
+@media (max-width:720px){table.resend thead{display:none}table.resend tr{display:flex;flex-wrap:wrap;align-items:center;gap:0 .6rem;border-bottom:1px solid var(--line)}
+  table.resend td{border:0}table.resend td.act{flex-basis:100%;padding-top:0}.resend-form{justify-content:stretch}.resend-form select{flex:1}}

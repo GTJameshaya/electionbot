@@ -234,6 +234,51 @@ class ReadingAudit(Base):
     at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
+class CrmTicket(Base):
+    """Последний тикет CRM по ведомости (дом + месяц + вид): в него дописываются повторные отправки."""
+    __tablename__ = "crm_tickets"
+    __table_args__ = (UniqueConstraint("house_id", "period", "kind", name="uq_crm_ticket_ledger"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    house_id: Mapped[int] = mapped_column(ForeignKey("houses.id"))
+    period: Mapped[str] = mapped_column(String(7))
+    kind: Mapped[str] = mapped_column(String(20))
+    ticket_number: Mapped[int] = mapped_column(Integer)
+    ticket_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source: Mapped[str] = mapped_column(String(20))          # bot / admin_resend
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+class ChatResend(Base):
+    """Журнал отправок ведомости в чат из админки («Отправить в чат»).
+
+    Строка появляется на шаге подтверждения (status=pending, хеш одноразового токена) и захватывается
+    одним UPDATE … WHERE status='pending' — поэтому двойной клик отправит файл только один раз."""
+    __tablename__ = "chat_resends"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    requested_by: Mapped[int] = mapped_column(BigInteger, index=True)
+    requested_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    house_id: Mapped[int] = mapped_column(ForeignKey("houses.id"))
+    period: Mapped[str] = mapped_column(String(7))
+    kind: Mapped[str] = mapped_column(String(20))
+    mode: Mapped[str] = mapped_column(String(20))                    # plain / ticket
+    reply_to_ticket: Mapped[int | None] = mapped_column(Integer, nullable=True)  # «дописать в тикет #N»
+    # pending → sending → sent / failed / unknown (неясно, дошёл ли файл: таймаут или процесс прервался)
+    status: Mapped[str] = mapped_column(String(20), default="pending", index=True)
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)  # нажали «Да, отправить»
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    chat_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    file_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    crm_status: Mapped[str | None] = mapped_column(String(20), nullable=True)   # None (не нужно) / ok / error
+    crm_ticket_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    crm_created: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    crm_message: Mapped[str | None] = mapped_column(Text, nullable=True)       # итог / ошибка / предупреждения
+
+
 ROLE_ADMIN, ROLE_USER, ROLE_NONE = "admin", "user", "none"
 ROLES = (ROLE_ADMIN, ROLE_USER, ROLE_NONE)
 
@@ -1008,6 +1053,102 @@ class Database:
             if res.rowcount != 1:
                 return None
             return s.scalar(select(LoginToken.user_id).where(LoginToken.token_hash == h))
+
+    # ---------- тикеты CRM
+    def get_crm_ticket(self, house_id: int, period: str, kind: str) -> CrmTicket | None:
+        with self.Session() as s:
+            return s.scalar(select(CrmTicket).where(CrmTicket.house_id == house_id, CrmTicket.period == period,
+                                                    CrmTicket.kind == kind))
+
+    def save_crm_ticket(self, house_id: int, period: str, kind: str, ticket_number: int,
+                        ticket_id: int | None, source: str) -> None:
+        """Запоминает последний тикет ведомости (новый номер заменяет старый)."""
+        with self.Session.begin() as s:
+            row = s.scalar(select(CrmTicket).where(CrmTicket.house_id == house_id, CrmTicket.period == period,
+                                                   CrmTicket.kind == kind))
+            if row is None:
+                s.add(CrmTicket(house_id=house_id, period=period, kind=kind, ticket_number=ticket_number,
+                                ticket_id=ticket_id, source=source))
+            else:
+                row.ticket_number, row.ticket_id, row.source = ticket_number, ticket_id, source
+                row.updated_at = utcnow()
+
+    # ---------- «Отправить в чат» из админки
+    def periods_with_readings(self, house_id: int, kind: str) -> dict[str, int]:
+        """{месяц: сколько показаний} — месяцы ведомости, за которые в базе есть показания."""
+        with self.Session() as s:
+            q = (select(Reading.period, func.count()).join(Apartment, Reading.apartment_id == Apartment.id)
+                 .where(Apartment.house_id == house_id, Apartment.kind == kind).group_by(Reading.period))
+            return {p: n for p, n in s.execute(q)}
+
+    def create_resend(self, user_id: int, user_name: str | None, house_id: int, period: str, kind: str,
+                      mode: str, reply_to_ticket: int | None = None) -> str:
+        """Шаг подтверждения: заводит строку pending и возвращает одноразовый токен (в БД — только хеш)."""
+        import hashlib
+        import secrets
+        from datetime import timedelta
+        raw = secrets.token_urlsafe(32)
+        with self.Session.begin() as s:
+            s.execute(delete(ChatResend).where(ChatResend.status == "pending",
+                                               ChatResend.created_at < utcnow() - timedelta(days=1)))
+            s.add(ChatResend(token_hash=hashlib.sha256(raw.encode()).hexdigest(), requested_by=user_id,
+                             requested_name=user_name, house_id=house_id, period=period, kind=kind,
+                             mode=mode, reply_to_ticket=reply_to_ticket, status="pending"))
+        return raw
+
+    def claim_resend(self, raw: str, user_id: int, ttl_seconds: int = 900) -> ChatResend | None:
+        """Подтверждение: pending → sending одним UPDATE. Второй раз (двойной клик, повтор POST,
+        чужой или устаревший токен) вернёт None — значит, отправлять нельзя."""
+        import hashlib
+        from datetime import timedelta
+        from sqlalchemy import update
+        if not raw:
+            return None
+        h = hashlib.sha256(raw.encode()).hexdigest()
+        with self.Session.begin() as s:
+            res = s.execute(update(ChatResend)
+                            .where(ChatResend.token_hash == h, ChatResend.status == "pending",
+                                   ChatResend.requested_by == user_id,
+                                   ChatResend.created_at > utcnow() - timedelta(seconds=ttl_seconds))
+                            .values(status="sending", claimed_at=utcnow())
+                            .execution_options(synchronize_session=False))
+            if res.rowcount != 1:
+                return None
+            return s.scalar(select(ChatResend).where(ChatResend.token_hash == h))
+
+    def peek_resend(self, raw: str) -> ChatResend | None:
+        import hashlib
+        with self.Session() as s:
+            return s.scalar(select(ChatResend).where(
+                ChatResend.token_hash == hashlib.sha256((raw or "").encode()).hexdigest()))
+
+    def finish_resend(self, resend_id: int, **values) -> None:
+        """Итог отправки: status, chat_id, message_id, file_name, error, crm_*."""
+        with self.Session.begin() as s:
+            row = s.get(ChatResend, resend_id)
+            if row is not None:
+                for k, v in values.items():
+                    setattr(row, k, v)
+
+    def expire_stale_resends(self, minutes: int = 10) -> int:
+        """«Зависшие» отправки (status=sending дольше minutes — например, админку перезапустили
+        посреди отправки) помечаем unknown: файл мог дойти, а мог и нет."""
+        from datetime import timedelta
+        from sqlalchemy import update
+        with self.Session.begin() as s:
+            res = s.execute(update(ChatResend)
+                            .where(ChatResend.status == "sending",
+                                   ChatResend.claimed_at < utcnow() - timedelta(minutes=minutes))
+                            .values(status="unknown",
+                                    error="отправка прервалась — файл мог дойти, проверьте чат")
+                            .execution_options(synchronize_session=False))
+            return res.rowcount or 0
+
+    def list_resends(self, limit: int = 100) -> list[ChatResend]:
+        """Журнал для админки — без неподтверждённых (pending)."""
+        with self.Session() as s:
+            return list(s.scalars(select(ChatResend).where(ChatResend.status != "pending")
+                                  .order_by(ChatResend.created_at.desc(), ChatResend.id.desc()).limit(limit)))
 
     # ---------- Excel
     def build_excel(self, house_id: int, period: str, kind: str = RESIDENTIAL) -> bytes:
